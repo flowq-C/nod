@@ -3034,7 +3034,7 @@ else {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
         if (isEngine(event) && remoteConnection) throw new Error('Local setup is unavailable.');
         if (options?.retry === true && !enginePreferencesReady) welcomeTransferError = undefined;
-        if (options?.retry === true && options.report === true) pendingFeedback = true;
+        if (options?.retry === true) pendingFeedback = options.report === true;
         await transferWelcome();
         if (options?.retry === true && status.windowError) {
           showEngine();
