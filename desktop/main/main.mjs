@@ -1072,6 +1072,15 @@ function showEngine({ focus = true } = {}) {
   engineWindows.add(engineWindow);
   protectWindow(engineWindow, engineOrigin);
   const window = engineWindow;
+  window.webContents.on('render-process-gone', (_event, details) => {
+    if (quitting || window.isDestroyed() || details.reason === 'clean-exit') return;
+    void writeDiagnostic(
+      `Window renderer stopped (${details.reason}, code ${details.exitCode}).`,
+    ).catch(() => {});
+    window.destroy();
+    update({ windowError: 'Nod’s window stopped unexpectedly. Try again or report the bug.' });
+    void showSettings('general', true);
+  });
   const failed = () => {
     if (quitting || window.isDestroyed() || !pendingRenderers.has(window)) return;
     welcomeNavigation ||= initialWelcome;
@@ -3025,6 +3034,7 @@ else {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
         if (isEngine(event) && remoteConnection) throw new Error('Local setup is unavailable.');
         if (options?.retry === true && !enginePreferencesReady) welcomeTransferError = undefined;
+        if (options?.retry === true && options.report === true) pendingFeedback = true;
         await transferWelcome();
         if (options?.retry === true && status.windowError) {
           showEngine();

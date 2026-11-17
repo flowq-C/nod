@@ -200,6 +200,8 @@ Select **Report bug** in the chat, or the report link Nod adds when a request st
 
 If the workspace crashes, use **Report bug** on the error screen before **Reload Nod** to include the captured error.
 
+In the desktop app, if Nod's background service or its window stops, Nod shows its error screen. Select **Report bug** there: Nod restarts and opens the report as soon as it's back, with the crash in the diagnostic report. If Nod can't restart, select **Show startup log** and send it with a screenshot of the error.
+
 Choose a feedback category and describe what happened. Include what you expected, what actually happened, and the steps that trigger the problem. **Include diagnostic report** starts selected for every category until you change it. Nod remembers your choice for your account on this device after sending or discarding a draft.
 
 Select **Review** to inspect the exact attachment, or untick the checkbox to omit it. The report masks known secrets and recognized personal details, but can miss information. If preparation fails, select **Continue without report**. Your Nod runtime prepares the report from recent messages, logs, and app activity. Only **Send feedback** sends it to the configured feedback recipient.
