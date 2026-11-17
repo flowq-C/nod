@@ -160,6 +160,13 @@ export function channelSetupBody(
       botToken: fields.botToken?.trim(),
       webhookUrl,
     };
+  if (provider === 'nostr')
+    return {
+      relayUrl: fields.relayUrl?.trim(),
+      privateKey: fields.privateKey?.trim(),
+      channels: fields.channels?.trim(),
+      allowedPubkeys: fields.allowedPubkeys?.trim(),
+    };
   return {
     accessToken: fields.accessToken?.trim(),
     appSecret: fields.appSecret?.trim(),

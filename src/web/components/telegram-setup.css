@@ -1,8 +1,10 @@
-.telegram-setup {
+.telegram-setup,
+.nostr-setup {
   min-width: 0;
 }
 
-.telegram-setup-steps {
+.telegram-setup-steps,
+.nostr-setup-steps {
   display: grid;
   gap: 16px;
   margin: 0;
@@ -10,14 +12,16 @@
   list-style: none;
 }
 
-.telegram-setup-steps > li {
+.telegram-setup-steps > li,
+.nostr-setup-steps > li {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
   align-items: start;
   gap: 12px;
 }
 
-.telegram-setup-marker {
+.telegram-setup-marker,
+.nostr-setup-marker {
   display: grid;
   place-items: center;
   width: 24px;
@@ -29,28 +33,33 @@
   font-weight: 500;
 }
 
-.telegram-setup-steps > li[data-state='active'] .telegram-setup-marker {
+.telegram-setup-steps > li[data-state='active'] .telegram-setup-marker,
+.nostr-setup-steps > li[data-state='active'] .nostr-setup-marker {
   background: var(--primary);
   color: var(--primary-foreground);
 }
 
-.telegram-setup-steps > li[data-state='done'] .telegram-setup-marker {
+.telegram-setup-steps > li[data-state='done'] .telegram-setup-marker,
+.nostr-setup-steps > li[data-state='done'] .nostr-setup-marker {
   background: var(--success-soft);
   color: var(--success);
 }
 
-.telegram-setup-step > strong {
+.telegram-setup-step > strong,
+.nostr-setup-step > strong {
   display: block;
   font-size: var(--text-control);
   font-weight: 500;
   line-height: 24px;
 }
 
-.telegram-setup-steps > li[data-state='next'] .telegram-setup-step > strong {
+.telegram-setup-steps > li[data-state='next'] .telegram-setup-step > strong,
+.nostr-setup-steps > li[data-state='next'] .nostr-setup-step > strong {
   color: var(--muted-foreground);
 }
 
-.telegram-setup-content {
+.telegram-setup-content,
+.nostr-setup-content {
   display: grid;
   justify-items: start;
   gap: 12px;
@@ -59,15 +68,20 @@
 
 .telegram-setup-content > .field,
 .telegram-setup-content > details,
-.telegram-setup-content > form {
+.telegram-setup-content > form,
+.nostr-setup-content > .field,
+.nostr-setup-content > details,
+.nostr-setup-content > form {
   justify-self: stretch;
 }
 
-.telegram-setup-content > form {
+.telegram-setup-content > form,
+.nostr-setup-content > form {
   padding: 0;
 }
 
-.telegram-setup p {
+.telegram-setup p,
+.nostr-setup p {
   color: var(--muted-foreground);
   font-size: var(--text-control);
   line-height: 1.6;
@@ -75,7 +89,9 @@
 }
 
 .telegram-setup p strong,
-.telegram-setup p code {
+.telegram-setup p code,
+.nostr-setup p strong,
+.nostr-setup p code {
   color: var(--foreground);
   font-weight: 500;
 }
@@ -107,7 +123,8 @@
   gap: 12px;
 }
 
-.telegram-setup-actions {
+.telegram-setup-actions,
+.nostr-setup-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;

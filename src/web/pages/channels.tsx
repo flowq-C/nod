@@ -10,8 +10,10 @@ import {
   Settings,
   Unlink,
   UserRound,
+  Workflow,
 } from '../components/icons';
 import { IntegrationCard } from '../components/integration-card';
+import { NostrSetup } from '../components/nostr-setup';
 import { TelegramSetup } from '../components/telegram-setup';
 import { WhatsAppSetup } from '../components/whatsapp-setup';
 import type { ChannelProvider, ChannelSetupSummary } from '../../shared/contracts';
@@ -42,6 +44,11 @@ const providers = [
     name: 'WhatsApp',
     description: 'Chat with Nod in WhatsApp.',
   },
+  {
+    id: 'nostr' as const,
+    name: 'Buzz',
+    description: 'Chat with Nod in Buzz.',
+  },
 ];
 const channelStatus = {
   'needs-setup': 'Needs setup',
@@ -62,6 +69,14 @@ function ExternalLinkText({ href, children }: { href: string; children: React.Re
       {children}
       <ExternalLink size={16} />
     </a>
+  );
+}
+
+function ChannelLogo({ id, size }: { id: ChannelProvider; size: number }) {
+  return id === 'nostr' ? (
+    <Workflow size={size} aria-hidden="true" />
+  ) : (
+    <img src={`/logos/${id}.svg`} alt="" width={size} height={size} />
   );
 }
 
@@ -296,7 +311,7 @@ function ChannelCard({
       id={`channel-${provider.id}`}
       className="channel-option"
       name={provider.name}
-      logo={<img src={`/logos/${provider.id}.svg`} alt="" width={24} height={24} />}
+      logo={<ChannelLogo id={provider.id} size={24} />}
       description={provider.description}
       detail={
         error
@@ -536,9 +551,11 @@ export function Channels() {
     setRemoving(provider);
   }
   const selected = channels.find((channel) => channel.provider.id === editing);
+  const nostrUpdate = fields.connection === 'nostr';
   const managing = Boolean(
     selected?.setup?.enabled &&
     !whatsappCloud &&
+    !nostrUpdate &&
     (editing === 'telegram' ? telegramStatus.paired : selected.setup.mode !== 'linked'),
   );
   function cards(items: typeof channels) {
@@ -632,7 +649,9 @@ export function Channels() {
               )?.focus({ preventScroll: true });
           }}
         >
-          <DialogTitle>Disconnect {removing === 'whatsapp' ? 'WhatsApp' : 'Telegram'}?</DialogTitle>
+          <DialogTitle>
+            Disconnect {providers.find((item) => item.id === removing)?.name ?? ''}?
+          </DialogTitle>
           <DialogDescription>
             Nod will stop receiving messages here. You can connect again later.
           </DialogDescription>
@@ -684,7 +703,7 @@ export function Channels() {
           {managing ? (
             <>
               <div className="dialog-heading app-manage-heading">
-                <img src={`/logos/${editing}.svg`} alt="" width={28} height={28} />
+                <ChannelLogo id={editing!} size={28} />
                 <DialogTitle ref={manageTitle} tabIndex={-1}>
                   {selected?.provider.name}
                 </DialogTitle>
@@ -742,6 +761,16 @@ export function Channels() {
               )}
               {editing === 'telegram' && telegramUrl ? (
                 <TelegramChat key={telegramUrl} url={telegramUrl} />
+              ) : editing === 'nostr' ? (
+                <div className="dialog-actions app-manage-actions">
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => setFields({ connection: 'nostr' })}
+                  >
+                    Update connection
+                  </Button>
+                </div>
               ) : editing === 'whatsapp' ? (
                 <div className="dialog-actions app-manage-actions">
                   <Button
@@ -802,6 +831,49 @@ export function Channels() {
                     variant="outline"
                     size="sm"
                     disabled={loading || busy || resuming}
+                    onClick={() => void load()}
+                  >
+                    {loading ? 'Retrying…' : 'Retry loading'}
+                  </Button>
+                )}
+              </div>
+            </>
+          ) : editing === 'nostr' ? (
+            <>
+              <DialogTitle className="channel-wizard-title">
+                <ChannelLogo id="nostr" size={24} />
+                {selected?.setup?.enabled ? 'Buzz' : 'Connect Buzz'}
+              </DialogTitle>
+              <DialogDescription>
+                {selected?.setup?.enabled
+                  ? 'Keep Nod running to receive messages.'
+                  : 'Connect your Buzz, then link your account.'}
+              </DialogDescription>
+              <NostrSetup
+                setup={channels.find((item) => item.provider.id === 'nostr')?.setup}
+                fields={fields}
+                busy={busy}
+                error={error || loadError}
+                unavailable={!settings?.ready}
+                onField={(name, value) => setFields((current) => ({ ...current, [name]: value }))}
+                onVerify={(event) => void submit(event)}
+              />
+              <div className="channel-wizard-actions">
+                {selected?.setup?.enabled && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => confirmDisconnect('nostr')}
+                  >
+                    Disconnect
+                  </Button>
+                )}
+                {loadError && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={loading || busy}
                     onClick={() => void load()}
                   >
                     {loading ? 'Retrying…' : 'Retry loading'}
