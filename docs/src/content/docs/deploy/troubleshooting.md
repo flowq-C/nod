@@ -149,6 +149,16 @@ If the connection service refuses the request, the sign-in page names its reason
 
 If an app tool error shows `HTTP 403` and a UTC time, [send feedback with a diagnostic report](/deploy/troubleshooting/#send-feedback-with-a-diagnostic-report). Include that time and any Cloudflare Ray ID in your feedback text. The displayed `0x` is a formatting prefix; support removes it before searching Cloudflare.
 
+### A file can't be sent to an app
+
+If the connection service refuses a file, the error names its reason and HTTP status, such as `file_verification_failed` and `HTTP 502`. The app action doesn't run, so nothing reaches the recipient.
+
+- For `file_too_large` or `invalid_file_data`, send a smaller or different file.
+- For `tool_account_mismatch`, pick the account that belongs to that app.
+- For other reasons, try again later.
+
+If it keeps failing, [send feedback with a diagnostic report](/deploy/troubleshooting/#send-feedback-with-a-diagnostic-report).
+
 ### App sign-in opens an unreachable address on a remote server
 
 Update the server to a version with [remote app sign-in](/deploy/self-host/#connect-apps-on-the-server). Set `NOD_PUBLIC_URL` to the exact address you open Nod at, then [apply the configuration](/deploy/configuration/#apply-configuration-changes).

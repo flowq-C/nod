@@ -684,7 +684,7 @@ test('managed integration requests bind SDK calls to a private persisted install
   let failExecution = false;
   let uploadResponse = 'nod-file.synthetic-owned-capability';
   let uploadName = 'synthetic.bin';
-  let failUpload = false;
+  let uploadRefusal: { error: string; status: number } | undefined;
   let pairingStatus: unknown = { pairingConfirmed: false };
   let expectedToolkit = 'gmail';
   let expectedReconnectAccountId: string | undefined;
@@ -819,7 +819,8 @@ test('managed integration requests bind SDK calls to a private persisted install
         mimeType: 'application/octet-stream',
         data: 'AP/+CkGA',
       });
-      if (failUpload) return Response.json({ error: 'upload_failed' }, { status: 503 });
+      if (uploadRefusal)
+        return Response.json({ error: uploadRefusal.error }, { status: uploadRefusal.status });
       return Response.json({
         name: uploadName,
         mimetype: 'application/octet-stream',
@@ -1095,10 +1096,19 @@ test('managed integration requests bind SDK calls to a private persisted install
   uploadName = file.name;
   uploadResponse = 'raw-project-file-key';
   await assert.rejects(session.upload!('GMAIL_SEND_EMAIL', file, undefined, 'ca_fixture_proxy'));
-  failUpload = true;
+  uploadRefusal = { error: 'file_verification_failed', status: 502 };
   const beforeUploadFailure = calls.length;
-  await assert.rejects(session.upload!('GMAIL_SEND_EMAIL', file, undefined, 'ca_fixture_proxy'));
+  await assert.rejects(
+    session.upload!('GMAIL_SEND_EMAIL', file, undefined, 'ca_fixture_proxy'),
+    /file_verification_failed\. HTTP 502\./,
+  );
   assert.equal(calls.length, beforeUploadFailure + 1);
+  uploadRefusal = { error: 'synthetic-private-detail', status: 503 };
+  await assert.rejects(
+    session.upload!('GMAIL_SEND_EMAIL', file, undefined, 'ca_fixture_proxy'),
+    (error: Error) => /HTTP 503\./.test(error.message) && !error.message.includes('synthetic'),
+  );
+  uploadRefusal = undefined;
   const beforeInvalidUpload = calls.length;
   await assert.rejects(
     session.upload!(
