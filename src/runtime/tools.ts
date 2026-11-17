@@ -1210,9 +1210,12 @@ export function nodTools(
       return link(url, message);
     }),
     bind(toolDefinitions.manage_personal_context, async (p) => {
-      if (turn.execution.parentRunId && p.action.startsWith('bug_report_'))
+      if (
+        p.action.startsWith('bug_report_') &&
+        (turn.execution.parentRunId || (context.background && !context.taskContext))
+      )
         throw new Error(
-          'A subagent cannot show or send bug reports. Tell the parent agent what went wrong.',
+          'Bug reports are only for work the owner follows. Describe what went wrong in your answer instead.',
         );
       if (p.action !== 'schedule_record_observation')
         return confirm(await context.manage(p.action, p.args));

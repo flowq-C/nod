@@ -1454,6 +1454,14 @@ async function initializeApplication(
       throw error;
     }
   };
+  let feedbackDrafts: Awaited<ReturnType<typeof registerFeedback>> | undefined;
+  const readyDrafts = () => {
+    if (!feedbackDrafts)
+      throw Object.assign(new Error('Bug reports are still starting. Try again in a moment.'), {
+        notRun: true,
+      });
+    return feedbackDrafts;
+  };
   const approvals = await createApprovals(
     async (action, args, provenance) => {
       if (
@@ -1490,7 +1498,7 @@ async function initializeApplication(
         : action === 'NOD_vault_allow'
           ? vaultAccess.allow(args)
           : action === 'NOD_bug_report_send'
-            ? feedbackDrafts.sendDraft(
+            ? readyDrafts().sendDraft(
                 String(args.draftId),
                 null,
                 () => provenance.signal?.aborted === true,
@@ -2370,7 +2378,7 @@ async function initializeApplication(
           return { id, state, snoozedUntil, feedback };
         }
         if (action === 'bug_report_draft' || action === 'bug_report_send') {
-          if (!feedbackDrafts.configured)
+          if (!readyDrafts().configured)
             return 'Bug reports cannot be sent from this Nod. Describe the problem in your reply instead.';
         }
         if (action === 'bug_report_draft') {
@@ -2382,7 +2390,7 @@ async function initializeApplication(
           return 'The owner now sees this bug report with a Send report button, or can reply "send" in a chat app. Do not repeat the summary.';
         }
         if (action === 'bug_report_send') {
-          const draft = await feedbackDrafts.draftFor(turn.threadId, provenance.sourceMessageId);
+          const draft = await readyDrafts().draftFor(turn.threadId, provenance.sourceMessageId);
           if (!draft)
             throw new Error(
               'No unsent bug report is waiting in this conversation. Draft one with bug_report_draft first.',
@@ -2871,7 +2879,7 @@ async function initializeApplication(
       return adapters.model.name;
     },
   };
-  const feedbackDrafts = await registerFeedback(app, {
+  feedbackDrafts = await registerFeedback(app, {
     pool,
     ownerId,
     context: feedbackReportOptions.context!,

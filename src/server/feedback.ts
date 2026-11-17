@@ -360,8 +360,7 @@ export async function registerFeedback(
           ? `SELECT id,summary FROM feedback_drafts WHERE owner_id=$1 AND thread_id=$2 AND id=$3`
           : `SELECT d.id,d.summary FROM feedback_drafts d
              WHERE d.owner_id=$1 AND d.thread_id=$2 AND d.created_at > now() - interval '1 day'
-               AND NOT EXISTS (SELECT 1 FROM feedback_submissions s WHERE s.owner_id=$1 AND s.id=d.id
-                 AND NOT (s.status='rejected' AND s.request_hash='' AND s.payload_hash=''))
+               AND NOT EXISTS (SELECT 1 FROM feedback_submissions s WHERE s.owner_id=$1 AND s.id=d.id)
              ORDER BY d.created_at DESC LIMIT 1`,
         replied ? [options.ownerId, threadId, replied] : [options.ownerId, threadId],
       )

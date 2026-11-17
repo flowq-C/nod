@@ -36,7 +36,6 @@ const settings = new Set([
   'NOD_schedule_pause',
   'NOD_schedule_cancel',
   'NOD_limits_update',
-  'NOD_bug_report_send',
   'NOD_notification_preferences_update',
   'NOD_memory_forget',
   'NOD_memory_control',

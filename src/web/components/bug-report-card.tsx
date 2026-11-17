@@ -73,11 +73,15 @@ export function BugReportCard({
     setReport(null);
     setPreview(false);
     reportRef.current = null;
-    reportRequest.current = post<FeedbackReport>('/api/feedback/report', {
-      activity: feedbackActivitySnapshot(),
-      errors: feedbackErrorsSnapshot(),
-      errorsAvailable: feedbackErrorsAvailable(),
-      client: feedbackClientState(),
+    reportRequest.current = api<FeedbackReport>('/api/feedback/report', {
+      method: 'POST',
+      body: JSON.stringify({
+        activity: feedbackActivitySnapshot(),
+        errors: feedbackErrorsSnapshot(),
+        errorsAvailable: feedbackErrorsAvailable(),
+        client: feedbackClientState(),
+      }),
+      signal: AbortSignal.timeout(30_000),
     })
       .then((snapshot) => {
         if (!feedbackReportData(snapshot.content))
@@ -108,16 +112,25 @@ export function BugReportCard({
       const prepared = included ? await prepareReport() : null;
       if (included && !prepared) return;
       applyReceipt(
-        await post<FeedbackReceipt>(`/api/feedback/drafts/${draftId}/send`, {
-          reportId: prepared?.id ?? null,
+        await api<FeedbackReceipt>(`/api/feedback/drafts/${draftId}/send`, {
+          method: 'POST',
+          body: JSON.stringify({ reportId: prepared?.id ?? null }),
+          signal: AbortSignal.timeout(90_000),
         }),
       );
     } catch (cause) {
-      if (cause instanceof ApiError && cause.status === 410) {
-        reportRef.current = null;
-        setReport(null);
+      const rejected =
+        cause instanceof ApiError &&
+        ((cause.status >= 400 && cause.status < 500 && ![408, 409].includes(cause.status)) ||
+          cause.status === 503);
+      if (!rejected) applyReceipt({ submissionId: draftId, status: 'unknown' });
+      else {
+        if (cause.status === 410) {
+          reportRef.current = null;
+          setReport(null);
+        }
+        setError(errorMessage(cause));
       }
-      setError(errorMessage(cause));
     } finally {
       sending.current = false;
       setBusy(false);
@@ -155,6 +168,32 @@ export function BugReportCard({
             >
               Check again
             </button>
+          </div>
+        ) : sent?.status === 'partial' ? (
+          <div className="action-card-note" role="status">
+            <p className="action-card-note-title">
+              <AlertCircle size={16} aria-hidden="true" />
+              Sent without the diagnostic report
+            </p>
+            {sent.canRetryAttachments && (
+              <button
+                type="button"
+                className="feedback-text-action"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    applyReceipt(await post<FeedbackReceipt>(`/api/feedback/${draftId}/retry`));
+                  } catch (cause) {
+                    setError(errorMessage(cause));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                Send the report again
+              </button>
+            )}
           </div>
         ) : sent ? (
           <div className="action-card-footer">
