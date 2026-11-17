@@ -261,7 +261,11 @@ Select **Report bug** at the top of the chat and describe what happened. The dia
 
 After first-time setup, a short invitation points to **Report bug**. Dismiss it with its close button or press Escape while the invitation or **Report bug** is focused; it stays dismissed on that device.
 
-When something in Nod itself fails, Nod may offer **Report bug** once in its reply. It skips this for errors from outside services and in background work. A request that stops on an unexpected error outside the model connection ends with a link to report it; a model connection failure links to **Settings > Models** instead. Both report links open the same dialog. In Telegram or WhatsApp, the link opens the report in the Nod desktop app when you tap it on the computer where Nod is installed. On another device, open Nod on that computer and select **Report bug**. Either way, you review the report before it is sent.
+When something in Nod itself fails, or you tell Nod that something in Nod isn't working, Nod drafts a bug report once with a short summary of what happened. In the app, the draft appears in chat as a card with the summary, **Include diagnostic report**, **Review** and **Send report**. One click on **Send report** sends it to the same recipient as the dialog. Nod skips this for errors from outside services, such as a missing connection, credits, an app outage or a website's own error, and in background checks.
+
+A request that stops on an unexpected error outside the model connection ends with the same card, filled in with the error. A model connection failure links to **Settings > Models** instead.
+
+In Telegram and WhatsApp, the draft arrives as text. Reply "send" to share it with the diagnostic report, or "send without diagnostics" to share only the text. Nod sends it only when your reply clearly asks for that, and otherwise asks you to confirm first. Nothing is sent until you click **Send report** or reply to send it.
 
 **Include diagnostic report** starts selected for every feedback category until you change it. It adds recent messages, tool inputs and results, errors, and app activity to help fix problems and improve Nod. Known secrets and recognized personal details are masked, but redaction can miss information.
 

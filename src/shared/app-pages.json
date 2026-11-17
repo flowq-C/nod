@@ -10,6 +10,5 @@
   "/settings/models": "Settings > Models",
   "/settings/voice": "Settings > Voice & audio",
   "/settings/memory": "Settings > Memory",
-  "/settings/privacy": "Settings > Privacy & data",
-  "/report-bug": "Report bug"
+  "/settings/privacy": "Settings > Privacy & data"
 }

@@ -126,6 +126,8 @@ For the other controls, see [How Nod protects app connections](/connect/apps/#ho
 
 A report sent with **Report bug** goes to the recipient the dialog names, which is the Nod team at n8n by default. It includes a diagnostic report unless you untick it. The report can include recent messages and tool results, with known secrets and recognized personal details masked. It also includes technical details about your setup: operating system version, memory, time zone, the selected model, settings such as quiet hours and spending limits, recent failures, and the desktop startup and update log. Select **Review** to check it before you send. On desktop, the draft also includes a screenshot of the Nod window, which you can remove.
 
+A bug report Nod drafts in chat sends Nod's written summary and, unless you leave it out, a diagnostic report. It goes only after you select **Send report** or reply to send it in Telegram or WhatsApp.
+
 Your Nod runtime redacts the report before it goes to the recipient the dialog names. It masks the names, addresses, account identifiers, file paths and links it recognizes, and keeps technical values such as versions, error types and status codes. Redaction can miss personal details, so review the report before you send it.
 
 See [Report contents and limits](/deploy/troubleshooting/#report-contents-and-limits).

@@ -427,8 +427,7 @@ function AuthenticatedApp({
   const openPage = (value: string, trigger?: HTMLElement) => {
     const destination = appPagePath(value);
     if (!destination) return;
-    if (destination === '/report-bug') void openFeedback();
-    else if (settingsPage(destination))
+    if (settingsPage(destination))
       openSettings(
         settingsSections.find((section) => section.path === destination)?.label ?? 'General',
         trigger,
@@ -460,11 +459,6 @@ function AuthenticatedApp({
       } else openPage(destination);
     });
   }, [onboarding]);
-  useEffect(() => {
-    if (path !== '/report-bug') return;
-    replaceNavigation('/');
-    void openFeedback();
-  }, [path]);
   useEffect(() => {
     if (path !== '/memory' || !session.settings!.onboardingCompleted) return;
     replaceNavigation('/settings/memory');
@@ -685,7 +679,6 @@ function AccountApp({
     if (sessionState.loading || !session?.user) return;
     const secure = /^\/(?:vault|credentials|payments)\/[^/]+\/?$/.test(path) || path === '/browser';
     if (path === '/memory' && session.settings?.onboardingCompleted) return;
-    if (path === '/report-bug') return;
     capturePageview(
       (!session.settings?.onboardingCompleted || replayingOnboarding(path)) && !secure
         ? '/onboarding'

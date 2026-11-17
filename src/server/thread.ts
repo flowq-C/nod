@@ -370,6 +370,28 @@ async function assertReplyTarget(
 
 export { pendingAnswerChoicesSql };
 
+export async function insertBugReportDraft(
+  client: PoolClient,
+  turn: TurnRef,
+  text: string,
+  summary: string,
+  streamId?: string,
+) {
+  const draftId = randomUUID();
+  await client.query(
+    'INSERT INTO feedback_drafts(id,owner_id,thread_id,summary) VALUES($1,$2,$3,$4)',
+    [draftId, ownerId, turn.threadId, summary],
+  );
+  return insertAssistantMessage(client, turn, text, [], streamId, undefined, {
+    version: 1,
+    title: 'Bug report for the Nod team',
+    sources: [],
+    type: 'bug-report',
+    draftId,
+    summary,
+  });
+}
+
 export async function insertAssistantMessage(
   client: PoolClient,
   turn: TurnRef,
@@ -457,7 +479,7 @@ export async function insertAssistantMessage(
       kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
     }
     afterCommit(client, () => {
-      if (visual)
+      if (visual && visual.type !== 'bug-report')
         analytics({
           event: 'output_created',
           properties: { presentation_kind: visual.type, count: 1 },
@@ -1267,9 +1289,7 @@ async function failTurn(
         : `I couldn't finish ${work ? `“${work}”` : 'this'}. ${error}${next ? ` ${next}` : ''}`;
   const message = modelFailure
     ? `${body}\n\n[Change the model or check its connection in ${appPages['/settings/models']}](/settings/models).`
-    : failure === 'unknown'
-      ? `${body}\n\nIf it keeps happening, [report it to the Nod team](/report-bug).`
-      : body;
+    : body;
   await transaction(async (client) => {
     if ((await lockThread(client)).id !== turn.thread_id) return;
     const current = await client.query(
@@ -1289,14 +1309,18 @@ async function failTurn(
         error,
       ],
     );
-    if (current.rowCount)
-      await insertAssistantMessage(
+    if (!current.rowCount) return;
+    const ref = { threadId: turn.thread_id, turnId, taskMessageId: turn.taskMessageId };
+    const streamId = `${modelFailure ? 'model-failure' : 'failure'}:${turnId}`;
+    if (failure === 'unknown')
+      await insertBugReportDraft(
         client,
-        { threadId: turn.thread_id, turnId, taskMessageId: turn.taskMessageId },
+        ref,
         message.trim(),
-        [],
-        `${modelFailure ? 'model-failure' : 'failure'}:${turnId}`,
+        `Nod stopped on an unexpected error${work ? ` while working on “${work}”` : ''}: ${error}`,
+        streamId,
       );
+    else await insertAssistantMessage(client, ref, message.trim(), [], streamId);
   }, pool);
   return true;
 }

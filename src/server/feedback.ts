@@ -213,12 +213,12 @@ export async function registerFeedback(
     reply.header('Cache-Control', 'no-store');
     return report;
   });
-  app.post('/api/feedback', { bodyLimit: feedbackLimits.requestBytes }, async (request, reply) => {
+  const deliver = async (
+    input: z.infer<typeof submission>,
+    abandoned: () => boolean = () => false,
+  ): Promise<FeedbackReceipt> => {
     const capture = snapshotAnalytics(options.analytics);
-    const startedAt = Date.now();
-    reply.header('Cache-Control', 'no-store');
     if (!options.delivery.configured) throw fail('Feedback sending is not configured yet.', 503);
-    const input = submission.parse(request.body);
     const requestHash = hash(JSON.stringify(input));
     const previous = await options.pool.query(
       'SELECT * FROM feedback_submissions WHERE owner_id=$1 AND id=$2',
@@ -280,8 +280,7 @@ export async function registerFeedback(
     if (repairs.size >= 5) repairs.delete(repairs.keys().next().value!);
     repairs.set(input.submissionId, { envelope, expiresAt: Date.now() + 3_600_000 });
     try {
-      if (request.raw.aborted || reply.raw.destroyed || Date.now() - startedAt > 60_000)
-        return await save({ submissionId: input.submissionId, status: 'rejected' });
+      if (abandoned()) return await save({ submissionId: input.submissionId, status: 'rejected' });
       const delivered = await save(await options.delivery.submit(envelope));
       if (delivered.status === 'submitted' || delivered.status === 'partial')
         capture?.({
@@ -298,6 +297,97 @@ export async function registerFeedback(
     } finally {
       pending.delete(input.submissionId);
     }
+  };
+  const technical = {
+    appVersion: options.context.appVersion,
+    appRelease: options.context.appRelease,
+    platform: options.context.platform,
+    development: options.context.development,
+    source: options.context.source,
+    appModified: options.context.appModified,
+  };
+  const draftRow = async (id: string) =>
+    (
+      await options.pool.query<{ summary: string }>(
+        'SELECT summary FROM feedback_drafts WHERE owner_id=$1 AND id=$2',
+        [options.ownerId, id],
+      )
+    ).rows[0];
+  const sentReceipt = async (id: string) => {
+    const row = (
+      await options.pool.query('SELECT * FROM feedback_submissions WHERE owner_id=$1 AND id=$2', [
+        options.ownerId,
+        id,
+      ])
+    ).rows[0];
+    return row && !rejectionClaim(row) ? receipt(row) : null;
+  };
+  const sendDraft = async (id: string, report: { reportId: string | null } | { build: true }) => {
+    const draft = await draftRow(id);
+    if (!draft) throw fail('This bug report is no longer available.', 404);
+    const sent = await sentReceipt(id);
+    if (sent) return sent;
+    let reportId = 'reportId' in report ? report.reportId : null;
+    if ('build' in report) {
+      sweep();
+      const content = await options.buildReport([], [], false);
+      if (Buffer.byteLength(content) > feedbackLimits.reportBytes)
+        throw fail('The diagnostic report is too large.', 413);
+      reportId = randomUUID();
+      if (reports.size >= 5) reports.delete(reports.keys().next().value!);
+      reports.set(reportId, {
+        id: reportId,
+        content,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+    }
+    return deliver({
+      submissionId: id,
+      category: 'bug',
+      feedback: draft.summary,
+      ...technical,
+      reportId,
+      attachments: [],
+    });
+  };
+  const latestDraft = async (threadId: string) =>
+    (
+      await options.pool.query<{ id: string; summary: string }>(
+        `SELECT d.id,d.summary FROM feedback_drafts d
+         WHERE d.owner_id=$1 AND d.thread_id=$2 AND d.created_at > now() - interval '1 day'
+         ORDER BY d.created_at DESC LIMIT 1`,
+        [options.ownerId, threadId],
+      )
+    ).rows[0];
+  app.post('/api/feedback', { bodyLimit: feedbackLimits.requestBytes }, async (request, reply) => {
+    const startedAt = Date.now();
+    reply.header('Cache-Control', 'no-store');
+    return deliver(
+      submission.parse(request.body),
+      () => request.raw.aborted || reply.raw.destroyed || Date.now() - startedAt > 60_000,
+    );
+  });
+  app.get<{ Params: { id: string } }>('/api/feedback/drafts/:id', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const id = uuid.parse(request.params.id);
+    const draft = await draftRow(id);
+    if (!draft) throw fail('This bug report is no longer available.', 404);
+    return {
+      id,
+      summary: draft.summary,
+      enabled: options.delivery.configured,
+      recipient: options.delivery.recipient,
+      receipt: await sentReceipt(id),
+    };
+  });
+  app.post<{ Params: { id: string } }>('/api/feedback/drafts/:id/send', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const id = uuid.parse(request.params.id);
+    const input = z
+      .object({ reportId: uuid.nullable() })
+      .strict()
+      .parse(request.body ?? {});
+    return sendDraft(id, { reportId: input.reportId });
   });
   app.get<{ Params: { id: string } }>('/api/feedback/:id', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
@@ -358,4 +448,5 @@ export async function registerFeedback(
       pending.delete(id);
     }
   });
+  return { sendDraft, latestDraft };
 }

@@ -1,8 +1,10 @@
 import { check, judge, scenario } from '../scenario.ts';
+import type { Run } from '../trace.ts';
 import { createApps, gmail } from './apps.ts';
 
 const owner = { name: 'Alex Rivera', email: 'alex.rivera@riveradesign.example' };
-const reportLink = /\]\(\/report-bug\)/;
+const bugReportCall = (run: Run, action: string) =>
+  run.tools.some((tool) => tool.name === 'manage_personal_context' && tool.input.action === action);
 
 function gmailNeedingReconnect(now: () => number) {
   const app = gmail(owner, [], now);
@@ -55,17 +57,17 @@ export function reportBugCase({
       await session.say(message);
     },
     evidence: (run) =>
-      `${nodProblem ? 'The owner reported a problem in Nod itself.' : 'Every Gmail read failed with a 403 that asks the owner to reconnect Gmail, which the owner can fix; nothing in Nod itself failed.'} Report bug links in the replies: ${reportLink.test(run.said) ? 'yes' : 'none'}.`,
+      `${nodProblem ? 'The owner reported a problem in Nod itself.' : 'Every Gmail read failed with a 403 that asks the owner to reconnect Gmail, which the owner can fix; nothing in Nod itself failed.'} Bug report drafted: ${bugReportCall(run, 'bug_report_draft') ? 'yes' : 'no'}. Bug report sent: ${bugReportCall(run, 'bug_report_send') ? 'yes' : 'no'}.`,
     expect(world) {
       return [
         check(
-          nodProblem ? 'offers-report-bug-link' : 'no-report-bug-link',
-          (run) => ({
-            pass: reportLink.test(run.said) === nodProblem,
-            evidence: run.said.slice(0, 600),
-          }),
+          nodProblem ? 'drafts-bug-report' : 'no-bug-report-draft',
+          (run) => bugReportCall(run, 'bug_report_draft') === nodProblem,
           { failure: nodProblem ? 'incomplete' : 'scope' },
         ),
+        check('no-bug-report-sent', (run) => !bugReportCall(run, 'bug_report_send'), {
+          failure: 'scope',
+        }),
         ...(nodProblem
           ? []
           : [
