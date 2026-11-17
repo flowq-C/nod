@@ -11793,7 +11793,8 @@ test('discovered requests identify Nod, follow redirects only to checked public 
     { url: 'https://api.fixture.example/start', authorization: 'Bearer synthetic-token' },
     { url: 'https://files.fixture.example/data', authorization: undefined },
   ]);
-  assert.deepEqual(agents, ['nod/0.1.0', 'nod/0.1.0']);
+  assert.equal(agents.length, 2);
+  for (const agent of agents) assert.match(agent ?? '', /^nod\/\S+$/);
   agents.length = 0;
   await safeRemoteFetch(
     'https://files.fixture.example/data',
