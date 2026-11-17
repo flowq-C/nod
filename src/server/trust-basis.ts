@@ -79,9 +79,15 @@ export function trustDecision(words: TrustWords) {
   };
 }
 
+const identifier = /[@/\\]|[\p{L}\p{N}]\p{M}*\.[\p{L}\p{N}]/u;
+
 const plain = (text: string) =>
   text
-    .normalize('NFKC')
+    .normalize('NFKD')
+    .split(/(\s+)/)
+    .map((word) => (identifier.test(word) ? word : word.replace(/(\p{L})[̀-ͯ]+/gu, '$1')))
+    .join('')
+    .normalize('NFC')
     .toLowerCase()
     .replace(/[“”«»„]/g, '"')
     .replace(/[‘’‚]/g, "'")
@@ -141,7 +147,7 @@ export function trustBasis(
       : undefined;
   const quote = because
     .trim()
-    .replace(/^["'“”«»„‘’‚]+|["'“”«»„‘’‚.!?…]+$/gu, '')
+    .replace(/^["'“”«»„‘’‚.…]+|["'“”«»„‘’‚.!?…]+$/gu, '')
     .trim();
   const needle = plain(quote);
   if (!needle) return undefined;

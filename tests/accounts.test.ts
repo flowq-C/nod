@@ -958,6 +958,46 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     ['Look at the budget folder', undefined],
   ] as const)
     assert.equal(trustBasis({ run: true, because }, scheduled)?.kind, kind);
+  const informal = withOwnerIds(
+    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'clica no icone de lapis e salva' }] },
+    ['owner-message'],
+  );
+  for (const [because, kind] of [
+    ['…clica no icone de lapis', 'message'],
+    ['clica no ícone de lápis', 'message'],
+    ['clica no ícone … salva', undefined],
+    ['apaga o ícone', undefined],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, informal)?.kind, kind, because);
+  const conditional = withOwnerIds(
+    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'send it if x ≠ 1' }] },
+    ['owner-message'],
+  );
+  for (const [because, kind] of [
+    ['send it if x ≠ 1', 'message'],
+    ['send it if x = 1', undefined],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, conditional)?.kind, kind, because);
+  const recipient = withOwnerIds(
+    {
+      userMessages: [
+        {
+          at: '2026-11-03T09:00:00Z',
+          text: 'manda o relatorio para lena@example.test e publica em docs.example.test/relatorio',
+        },
+        { at: '2026-11-03T09:01:00Z', text: 'avisa cafe.example.test, ação:sim' },
+      ],
+    },
+    ['owner-message', 'owner-reply'],
+  );
+  for (const [because, kind] of [
+    ['manda o relatório para lena@example.test', 'message'],
+    ['manda o relatorio para lena@exämple.test', undefined],
+    ['publica em docs.exämple.test/relatorio', undefined],
+    ['avisa café.example.test', undefined],
+    ['acao:sim', 'message'],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, recipient)?.kind, kind, because);
   assert.equal(
     trustDecision(scheduled).question.choices.some(({ value }) =>
       String(value).startsWith('message:'),
@@ -1485,6 +1525,10 @@ describe('account routes', () => {
         await activity.wait?.();
         return owner === 'local-owner' ? Math.min(activity.days, limit) : 0;
       },
+      async seenSurveys() {
+        return [];
+      },
+      async markSurveySeen() {},
       async update(_owner, input) {
         calls.writes++;
         const saved = record;
@@ -6404,6 +6448,37 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     await message(f.owner, 'user', currentThread, '2026-11-03T12:00:00Z');
     assert.equal(await createAccountStore(f.database).activeDays(f.owner, 3), 3);
     assert.equal(await accounts.activeDays('owner-without-messages', 3), 0);
+
+    await accounts.update(f.owner, { onboardingCompleted: true });
+    assert.deepEqual((await session()).analytics.seenSurveys, []);
+    const survey = randomUUID();
+    const seen = (key: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/account/survey-seen',
+        headers: { origin: 'http://localhost:4399' },
+        payload: { survey: key },
+      });
+    assert.notEqual((await seen('not-a-survey')).statusCode, 200);
+    assert.notEqual((await seen(`${survey}_${'9'.repeat(10)}`)).statusCode, 200);
+    assert.equal((await seen(survey)).statusCode, 200);
+    assert.equal((await seen(survey)).statusCode, 200);
+    assert.equal((await seen(`${survey}_2`)).statusCode, 200);
+    const restarted = Fastify();
+    t.after(() => restarted.close());
+    createAccountSession({
+      accounts: createAccountStore(f.database),
+      analytics: f.analytics,
+      origin: 'http://localhost:4399',
+      localUser: { id: f.owner, name: 'Synthetic Owner', email: null, avatarUrl: null },
+    }).register(restarted);
+    const after = await restarted.inject({ method: 'GET', url: '/api/session' });
+    assert.deepEqual(after.json().analytics.seenSurveys, [survey, `${survey}_2`]);
+    await accounts.update('other-survey-owner', { onboardingCompleted: true });
+    assert.deepEqual(await accounts.seenSurveys('other-survey-owner'), []);
+    const keys = Array.from({ length: 101 }, () => randomUUID());
+    for (const key of keys) await accounts.markSurveySeen('other-survey-owner', key);
+    assert.deepEqual(await accounts.seenSurveys('other-survey-owner'), keys.slice(1));
   });
 
   test('preferences and spending expose committed bounded states across actors, owners and consent periods', async (t) => {

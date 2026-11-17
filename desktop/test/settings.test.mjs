@@ -8020,7 +8020,7 @@ test('native readiness notification waits for full runtime readiness and reaches
   }
 });
 
-test('artifact exports keep owned bytes, safe names, separate saves and restricted opening', async () => {
+test('artifact exports keep owned bytes, safe names, separate saves and restricted opening, and remove failed downloads', async () => {
   const { createArtifactFiles, canOpenArtifact } = await import('../main/artifact-files.mjs');
   const root = await mkdtemp(join(tmpdir(), 'nod-artifact-contract-'));
   let requests = 0;
@@ -8072,6 +8072,24 @@ test('artifact exports keep owned bytes, safe names, separate saves and restrict
       fetchArtifact: async () => new Response('', { status: 404 }),
     });
     await assert.rejects(absent.prepare(randomUUID()), /no longer available/);
+    const brokenRoot = await mkdtemp(join(root, 'broken-'));
+    const broken = createArtifactFiles({
+      temporary: brokenRoot,
+      downloads: root,
+      fetchArtifact: async () =>
+        new Response(
+          new ReadableStream({
+            async pull(controller) {
+              controller.enqueue(new TextEncoder().encode('Partial synthetic bytes'));
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              controller.error(new Error('Synthetic connection reset'));
+            },
+          }),
+        ),
+    });
+    await assert.rejects(broken.prepare(randomUUID()), /Synthetic connection reset/);
+    const [created] = await readdir(brokenRoot);
+    assert.deepEqual(await readdir(join(brokenRoot, created)), []);
     const blocked = join(root, 'not-a-directory');
     await writeFile(blocked, 'Synthetic disk setup failure');
     let cancelled = false;

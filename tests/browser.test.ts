@@ -3830,7 +3830,12 @@ test('UI analytics keep answer choices, the survey card and survey flag requests
         disconnect() { this.disconnected = true; }
         intersect(...values) { this.callback(values.map(value => ({ target: this.element, isIntersecting: value }))); }
       };
-      globalThis.fetch = async () => { throw new Error('This fixture cannot use the network.'); };
+      const seenRequests = [];
+      globalThis.fetch = async (path, options) => {
+        if (path !== '/api/account/survey-seen') throw new Error('This fixture cannot use the network.');
+        seenRequests.push(JSON.parse(options.body).survey);
+        return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+      };
       const sent = [], requests = [];
       const client = {
         init(key, options) { this.token = key; this.options = options; },
@@ -4110,6 +4115,7 @@ test('UI analytics keep answer choices, the survey card and survey flag requests
       assert.equal(sent.length, beforeCard + 1);
       assert.equal(sent.at(-1).event, 'survey shown');
       assert.ok(localStorage.getItem('lastSeenSurveyDate'));
+      assert.deepEqual(seenRequests, [survey]);
       await visible(false);
       await visible(true);
       assert.equal(sent.length, beforeCard + 1);
@@ -4177,6 +4183,27 @@ test('UI analytics keep answer choices, the survey card and survey flag requests
       assert.equal(sent.at(-1).properties.$survey_submission_id, intermediate.properties.$survey_submission_id);
       assert.ok(!JSON.stringify(sent.slice(beforeNext)).includes('PRIVATE_'));
       await act(() => root.render(null));
+      client.surveys = [{ id: survey, type: 'api', current_iteration: null, questions }];
+      await act(() => configureAnalytics({ ...configuration, surveys: true, seenSurveys: [survey] }, 'web'));
+      await act(() => root.render(createElement(SurveyCard)));
+      assert.equal(card(), null);
+      await act(() => root.render(null));
+      client.surveys = [{ id: survey, type: 'api', current_iteration: 2, questions }];
+      await act(() => root.render(createElement(SurveyCard)));
+      assert.ok(card());
+      assert.equal(seenRequests.at(-1), survey + '_2');
+      await act(() => root.render(null));
+      await act(() => root.render(createElement(SurveyCard)));
+      assert.equal(card(), null);
+      await act(() => root.render(null));
+      client.surveys = [{ id: survey, type: 'api', current_iteration: 3, questions }];
+      await act(() => root.render(createElement(SurveyCard)));
+      await act(() => card().querySelector('.survey-card-close').click());
+      client.surveys = [{ id: survey, type: 'api', current_iteration: 4, questions }];
+      await act(() => configureAnalytics({ ...configuration, surveys: true, seenSurveys: [survey, survey + '_2', survey + '_3'] }, 'web'));
+      assert.ok(card());
+      await act(() => root.render(null));
+      consent(true);
       client.deferSurveys = true;
       await act(() => root.render(createElement(SurveyCard)));
       assert.equal(card(), null);

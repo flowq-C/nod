@@ -263,7 +263,7 @@ Answer-choice views count once per question in a sharing period, while the choic
 
 ### Surveys
 
-While **Share usage data** is on, the Nod team can show a short survey, such as how likely you are to recommend Nod. Surveys become eligible after you've sent Nod messages on at least three different UTC calendar days. That count stays on your Nod installation and isn't sent to PostHog. Questions and targeting are set in PostHog.
+While **Share usage data** is on, the Nod team can show a short survey, such as how likely you are to recommend Nod. Surveys become eligible after you've sent Nod messages on at least three different UTC calendar days. That count stays on your Nod installation and isn't sent to PostHog. Questions and targeting are set in PostHog. Each survey normally appears once: after its card has been shown, Nod saves that with your account and doesn't show it again, in the app or any browser you use with the same Nod, even if you closed it without answering. A repeating survey can return for its next round. If Nod can't save that the card was shown, the survey can appear once more the next time you open Nod.
 
 The survey asks one question at a time. Choosing a score, such as a recommendation score from 0 to 10, sends it immediately, even if you close the survey afterward. Typed text is sent only when you select **Next** or **Send**. Closing never sends unsubmitted text or withdraws answers already sent. You can close a survey without answering.
 
