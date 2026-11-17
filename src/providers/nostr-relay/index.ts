@@ -25,7 +25,7 @@ const eventSchema = z.object({
   pubkey: z.string().regex(identityPattern),
   created_at: z.number().int().nonnegative(),
   kind: z.number().int().nonnegative(),
-  tags: z.array(z.array(z.string().max(1024)).max(8)).max(256),
+  tags: z.array(z.array(z.string().max(2048)).max(32)).max(256),
   content: z.string().max(200_000),
   sig: z.string().regex(signaturePattern),
 });
@@ -253,7 +253,14 @@ export function createNostrRelayTransport(
       return;
     }
     if (type === 'CLOSED') {
-      if (message[1] === subscriptionId) subscribed = false;
+      if (message[1] !== subscriptionId) return;
+      subscribed = false;
+      // CLOSED leaves the connection up but silent, and receiving stops without error.
+      // Rebuild the connection and the subscription instead.
+      // Authentication demands answer with the signed AUTH challenge and re-subscribe.
+      const reason = typeof message[2] === 'string' ? message[2] : '';
+      if (!reason.includes('auth-required'))
+        disconnect(current, 'The Nostr relay closed the subscription. Nod is trying to reconnect.');
     }
   }
 

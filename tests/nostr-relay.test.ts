@@ -268,6 +268,48 @@ test('answers NIP-42 authentication and restores the subscription', async () => 
   ]);
   socket.message(['OK', again.id, true, '']);
   assert.equal(socket.frames('REQ').length, 2);
+
+  socket.message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
+  assert.equal(transport.channels[0].available, false);
+  assert.match(transport.channels[0].error ?? '', /closed the subscription/);
+});
+
+test('rebuilds the connection and the subscription after the relay closes it', async () => {
+  const sockets: FakeSocket[] = [];
+  const transport = createNostrRelayTransport(environment(), {
+    createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const collect = async (_message: InboundMessage) => {};
+  await transport.poll?.(collect);
+  sockets[0].open();
+  assert.equal(sockets[0].frames('REQ').length, 1);
+
+  sockets[0].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  assert.equal(sockets.length, 2);
+  sockets[1].open();
+  assert.equal(sockets[1].frames('REQ').length, 1);
+});
+
+test('keeps events with many mention tags', async () => {
+  const { socket, transport, received, collect } = connectedTransport();
+  await transport.poll?.(collect);
+  socket.open();
+  const mentions = Array.from({ length: 12 }, (_, index) => ['p', `${index}`.padStart(64, '0')]);
+  const event = signEvent(senderSecret, {
+    kind: 9,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['h', 'room'], ['p', botIdentity], ...mentions],
+    content: 'many mentions',
+  });
+  socket.message(['EVENT', 'sub', event]);
+  await transport.poll?.(collect);
+  assert.equal(received.length, 1);
 });
 
 test('posts kind 9 replies only after relay confirmation', async () => {
