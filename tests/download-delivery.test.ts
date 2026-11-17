@@ -81,6 +81,7 @@ test(
     const fetchLocal = globalThis.fetch.bind(globalThis);
     const captured = new Map<string, Artifact>();
     const publicationPaths = new Map<string, string>();
+    let publicationQueryFailures = 0;
     const held = new Map<string, RuntimeContext>();
     const release = new Map<string, () => void>();
     const runtimes = new Map<string, ReturnType<typeof createAgentRuntime>>();
@@ -384,7 +385,10 @@ test(
         artifacts: {
           ...localArtifacts,
           async publishArtifact(...args) {
-            if (args[1].endsWith('/query-failure.txt')) await args[4]!.query('SELECT 1/0');
+            if (args[1].endsWith('/query-failure.txt')) {
+              publicationQueryFailures += 1;
+              await args[4]!.query('SELECT 1/0');
+            }
             const artifact = await localArtifacts.publishArtifact(...args);
             const row = (
               await args[4]!.query('SELECT storage_path FROM artifacts WHERE id=$1', [artifact.id])
@@ -920,6 +924,7 @@ test(
           );
           for (const path of unavailable) assert.ok(delivered.text.includes(`\`${path}\``));
           assert.ok(delivered.text.includes(`(${delivered.attachments[0].url})`));
+          assert.equal(publicationQueryFailures, 1);
           const shared = await context.publish('calendar.ics');
           await context.reply(`Calendar again: \`${root}/calendar.ics\``);
           const again = (
