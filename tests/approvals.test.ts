@@ -1714,6 +1714,50 @@ test(
         await finish(declined.turnId, 'cancelled');
       });
 
+      await t.test(
+        'a browser step quoted from informal owner words runs, and uncovered steps still ask',
+        async () => {
+          const request =
+            'no brecho.example.test clica no icone de lapis do anuncio da luminaria, muda o preço p 90 e salva as alteraçoes';
+          const step = (name: string) => ({
+            website: 'https://brecho.example.test',
+            page: 'https://brecho.example.test/minha-loja/anuncios',
+            step: 'click',
+            control: [{ role: 'button', name }],
+            command: { action: 'click', selector: '@e12' },
+          });
+          const turn = await begin(request);
+          for (const because of [
+            '...clica no icone de lapis do anuncio da luminaria',
+            '…salva as alteraçoes',
+            'clica no ícone de lápis do anúncio da luminária',
+            'salva as alterações',
+          ]) {
+            aligned = () => ({ run: true, because });
+            const verdict = await trust.check(turn, 'NOD_browser', step('editar anúncio'));
+            assert.equal(verdict.confirm, false, because);
+            assert.equal(!verdict.confirm && verdict.basis.kind, 'message', because);
+          }
+          for (const because of [
+            'clica no ícone ... salva as alterações',
+            'apaga o anúncio da luminária',
+            '...',
+          ]) {
+            aligned = () => ({ run: true, because });
+            compareVerdict(await trust.check(turn, 'NOD_browser', step('apagar anúncio')), {
+              confirm: true,
+              reason: 'unrequested',
+            });
+          }
+          aligned = false;
+          compareVerdict(await trust.check(turn, 'NOD_browser', step('apagar anúncio')), {
+            confirm: true,
+            reason: 'unrequested',
+          });
+          await finish(turn.turnId, 'cancelled');
+        },
+      );
+
       await t.test('a newer chat correction before action handoff prevents the write', async () => {
         aligned = true;
         const action = 'GMAIL_SEND_EMAIL';

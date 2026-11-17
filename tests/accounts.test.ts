@@ -958,6 +958,46 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     ['Look at the budget folder', undefined],
   ] as const)
     assert.equal(trustBasis({ run: true, because }, scheduled)?.kind, kind);
+  const informal = withOwnerIds(
+    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'clica no icone de lapis e salva' }] },
+    ['owner-message'],
+  );
+  for (const [because, kind] of [
+    ['…clica no icone de lapis', 'message'],
+    ['clica no ícone de lápis', 'message'],
+    ['clica no ícone … salva', undefined],
+    ['apaga o ícone', undefined],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, informal)?.kind, kind, because);
+  const conditional = withOwnerIds(
+    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'send it if x ≠ 1' }] },
+    ['owner-message'],
+  );
+  for (const [because, kind] of [
+    ['send it if x ≠ 1', 'message'],
+    ['send it if x = 1', undefined],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, conditional)?.kind, kind, because);
+  const recipient = withOwnerIds(
+    {
+      userMessages: [
+        {
+          at: '2026-11-03T09:00:00Z',
+          text: 'manda o relatorio para lena@example.test e publica em docs.example.test/relatorio',
+        },
+        { at: '2026-11-03T09:01:00Z', text: 'avisa cafe.example.test, ação:sim' },
+      ],
+    },
+    ['owner-message', 'owner-reply'],
+  );
+  for (const [because, kind] of [
+    ['manda o relatório para lena@example.test', 'message'],
+    ['manda o relatorio para lena@exämple.test', undefined],
+    ['publica em docs.exämple.test/relatorio', undefined],
+    ['avisa café.example.test', undefined],
+    ['acao:sim', 'message'],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, recipient)?.kind, kind, because);
   assert.equal(
     trustDecision(scheduled).question.choices.some(({ value }) =>
       String(value).startsWith('message:'),
@@ -1485,6 +1525,10 @@ describe('account routes', () => {
         await activity.wait?.();
         return owner === 'local-owner' ? Math.min(activity.days, limit) : 0;
       },
+      async seenSurveys() {
+        return [];
+      },
+      async markSurveySeen() {},
       async update(_owner, input) {
         calls.writes++;
         const saved = record;
@@ -3196,6 +3240,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       /HTTP 402; This request requires more credits\./,
     );
     assert.match(service.current.issue!.reason, /requires more credits/);
+    assert.deepEqual(service.view().selectionIssue, service.current.issue);
     assert.equal(await allowed(), false);
     assert.equal(await allowed(second), true);
     assert.equal(service.paused({ kind: 'schedule', schedule: first }), true);
@@ -3247,6 +3292,8 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     await service.select(second);
     assert.equal(checks, 3);
     assert.equal(service.current.issue, undefined);
+    assert.equal(service.view().selectionIssue, undefined);
+    assert.match(service.view().connections[0]!.issue!.reason, /requires more credits/);
     reply = healthy;
     assert.equal((await ask()).stopReason, 'stop');
     assert.equal(calls, 6);
@@ -4190,6 +4237,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     Object.assign(f.keyStore, createEnvironmentKeyStore(invalidKey));
     const calls = { signIn: 0, authorize: 0, catalog: 0 };
     let rejectSignIn = false;
+    let rejectStart = false;
     const signIn = stubSignIn(async () => {
       if (rejectSignIn) throw new Error('Synthetic sign-in failure');
       return subscriptionCredential();
@@ -4198,10 +4246,12 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       ...f.backend,
       signIn(input) {
         calls.signIn++;
+        if (rejectStart) throw new Error('Synthetic sign-in start failure');
         return signIn(input);
       },
       authorize(input) {
         calls.authorize++;
+        if (rejectStart) throw new Error('Synthetic sign-in start failure');
         return f.backend.authorize(input);
       },
       catalog(provider, method) {
@@ -4274,6 +4324,69 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     );
     assert.deepEqual(captured.slice(failures.length + 1), [failures[0]]);
     assert.deepEqual(calls, { signIn: 2, authorize: 0, catalog: 1 });
+    rejectStart = true;
+    for (const provider of ['openai', 'openrouter'] as const)
+      await assert.rejects(owner.start(provider), /Synthetic sign-in start failure/);
+    assert.deepEqual(captured.slice(failures.length + 2), [failures[0], failures[1]]);
+    assert.deepEqual(calls, { signIn: 3, authorize: 1, catalog: 1 });
+  });
+
+  test('sign-in start failures keep the consent period that started the request', async (t) => {
+    for (const boundary of ['provider', 'storage'])
+      for (const changeConsent of [false, true]) {
+        const f = await fixture(t);
+        let entered!: () => void;
+        let reject!: (error: Error) => void;
+        const starting = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const result = new Promise<never>((_resolve, fail) => {
+          reject = fail;
+        });
+        const ownerId = `fixture-sign-in-${boundary}-${changeConsent}`;
+        const owner = await f.create(ownerId, {
+          ...f.backend,
+          signIn: async () => {
+            entered();
+            return result;
+          },
+        });
+        if (boundary === 'storage')
+          f.keyStore.getKey = async () => {
+            entered();
+            return result;
+          };
+        const captured: Parameters<ProductAnalytics['capture']>[0][] = [];
+        const analytics = await createAnalytics({
+          provider: { capture: (event) => captured.push(event), shutdown: async () => {} },
+          environment: 'development',
+          dataRoot: '.',
+          installationId: randomUUID(),
+        });
+        t.after(() => analytics.shutdown());
+        analytics.setUsageData(ownerId, true);
+        const app = Fastify();
+        owner.register(app, analytics.forOwner(ownerId));
+        t.after(() => app.close());
+        const failed = assert.rejects(owner.start('openai'));
+        await starting;
+        if (changeConsent) {
+          analytics.setUsageData(ownerId, false);
+          analytics.setUsageData(ownerId, true);
+        }
+        reject(new Error('Synthetic sign-in start failure'));
+        await failed;
+        assert.deepEqual(
+          captured.map(({ event, properties }) => [
+            event,
+            properties.provider,
+            properties.method,
+            properties.status,
+          ]),
+          changeConsent ? [] : [['model_connection_changed', 'openai', 'subscription', 'failed']],
+          `${boundary}: consent changed=${changeConsent}`,
+        );
+      }
   });
 
   test('removing a selected model records only committed clearing within its consent period', async (t) => {
@@ -6404,6 +6517,37 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     await message(f.owner, 'user', currentThread, '2026-11-03T12:00:00Z');
     assert.equal(await createAccountStore(f.database).activeDays(f.owner, 3), 3);
     assert.equal(await accounts.activeDays('owner-without-messages', 3), 0);
+
+    await accounts.update(f.owner, { onboardingCompleted: true });
+    assert.deepEqual((await session()).analytics.seenSurveys, []);
+    const survey = randomUUID();
+    const seen = (key: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/account/survey-seen',
+        headers: { origin: 'http://localhost:4399' },
+        payload: { survey: key },
+      });
+    assert.notEqual((await seen('not-a-survey')).statusCode, 200);
+    assert.notEqual((await seen(`${survey}_${'9'.repeat(10)}`)).statusCode, 200);
+    assert.equal((await seen(survey)).statusCode, 200);
+    assert.equal((await seen(survey)).statusCode, 200);
+    assert.equal((await seen(`${survey}_2`)).statusCode, 200);
+    const restarted = Fastify();
+    t.after(() => restarted.close());
+    createAccountSession({
+      accounts: createAccountStore(f.database),
+      analytics: f.analytics,
+      origin: 'http://localhost:4399',
+      localUser: { id: f.owner, name: 'Synthetic Owner', email: null, avatarUrl: null },
+    }).register(restarted);
+    const after = await restarted.inject({ method: 'GET', url: '/api/session' });
+    assert.deepEqual(after.json().analytics.seenSurveys, [survey, `${survey}_2`]);
+    await accounts.update('other-survey-owner', { onboardingCompleted: true });
+    assert.deepEqual(await accounts.seenSurveys('other-survey-owner'), []);
+    const keys = Array.from({ length: 101 }, () => randomUUID());
+    for (const key of keys) await accounts.markSurveySeen('other-survey-owner', key);
+    assert.deepEqual(await accounts.seenSurveys('other-survey-owner'), keys.slice(1));
   });
 
   test('preferences and spending expose committed bounded states across actors, owners and consent periods', async (t) => {
