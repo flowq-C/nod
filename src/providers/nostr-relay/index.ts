@@ -154,7 +154,6 @@ export function createNostrRelayTransport(
   const incoming: InboundMessage[] = [];
   const pending = new Map<string, (accepted: boolean) => void>();
   let socket: RelaySocket | undefined;
-  let subscribed = false;
   let authenticating = false;
   let attempt = 0;
   let reconnect: ReturnType<typeof setTimeout> | undefined;
@@ -207,7 +206,6 @@ export function createNostrRelayTransport(
         since: Math.floor(Date.now() / 1000) - lookbackSeconds,
       },
     ]);
-    subscribed = true;
   }
 
   function authenticate(current: RelaySocket, challenge: unknown) {
@@ -224,7 +222,9 @@ export function createNostrRelayTransport(
     });
     confirm(current, event, 'AUTH', () => {
       authenticating = false;
-      if (!subscribed) subscribe(current);
+      // Always re-subscribe: the relay can close the pre-auth REQ after this answer.
+      // A subscription sent before the authentication is no proof of a live one.
+      subscribe(current);
     }).catch(() => {
       authenticating = false;
       disconnect(current, 'The Nostr relay authentication failed. Nod is trying to reconnect.');
@@ -254,12 +254,10 @@ export function createNostrRelayTransport(
     }
     if (type === 'CLOSED') {
       if (message[1] !== subscriptionId) return;
-      subscribed = false;
       // CLOSED leaves the connection up but silent, and receiving stops without error.
       // Rebuild the connection and the subscription instead.
-      // Authentication demands answer with the signed AUTH challenge and re-subscribe.
-      const reason = typeof message[2] === 'string' ? message[2] : '';
-      if (!reason.includes('auth-required'))
+      // Exception: an in-flight authentication answer re-subscribes on this connection.
+      if (!authenticating)
         disconnect(current, 'The Nostr relay closed the subscription. Nod is trying to reconnect.');
     }
   }
@@ -312,7 +310,6 @@ export function createNostrRelayTransport(
   function disconnect(current: RelaySocket, message: string) {
     if (closed || socket !== current) return;
     socket = undefined;
-    subscribed = false;
     authenticating = false;
     channel.available = false;
     channel.error = message;
@@ -329,7 +326,6 @@ export function createNostrRelayTransport(
       config.relayUrl,
     );
     socket = current;
-    subscribed = false;
     authenticating = false;
     current.addEventListener('open', () => {
       if (closed || socket !== current) return;

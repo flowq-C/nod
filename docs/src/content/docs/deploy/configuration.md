@@ -157,10 +157,6 @@ Set `TELEGRAM_ENABLED=false` or `WHATSAPP_ENABLED=false` to disable a channel ex
 
 For QR setup, use **Channels** to scan the code. The `bot` and `self-chat` modes do not use the Meta access token, app secret, business phone number ID or webhook token. The saved device keys stay encrypted in the database. See [WhatsApp setup](/use/channels/#set-up-a-channel).
 
-### Nostr relay
-
-Nod connects to `NOSTR_RELAY_URL` and subscribes to chat events (kind 9) in the channels of `NOSTR_CHANNELS` that address the channel account (`p` tag). It signs its replies with `NOSTR_PRIVATE_KEY` (BIP340) and answers in the same channel. The relay challenges the connection with NIP-42 authentication, answered by a signed kind 22242 event. Events that fail signature checks, come from keys outside `NOSTR_ALLOWED_PUBKEYS`, or do not address the channel account are dropped. Each sender in a relay channel maps to one conversation thread (`<channel id>/<sender public key>`). Files stay in the app; the reply names them.
-
 The smallest Telegram configuration needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_ID`; it uses polling.
 
 ### Telegram webhooks
@@ -177,6 +173,10 @@ Set `TELEGRAM_MODE=webhook` and `TELEGRAM_WEBHOOK_SECRET_TOKEN`, then [apply the
 Nod does not register environment-managed webhooks for you. Check [getWebhookInfo](https://core.telegram.org/bots/api#getwebhookinfo) for the saved URL, update types, and delivery errors. Register again after changing the public URL or webhook secret, or to enable reactions on an existing webhook.
 
 To switch to polling, remove the webhook with Telegram's [deleteWebhook method](https://core.telegram.org/bots/api#deletewebhook), keeping `drop_pending_updates=false`. Set `TELEGRAM_MODE=polling` and apply the configuration. Telegram does not allow polling while a webhook is registered.
+
+### Nostr relay
+
+Nod connects to `NOSTR_RELAY_URL` and subscribes to chat events (kind 9) in the channels of `NOSTR_CHANNELS` that address the channel account (`p` tag). It signs its replies with `NOSTR_PRIVATE_KEY` (BIP340) and answers in the same channel. The relay challenges the connection with NIP-42 authentication, answered by a signed kind 22242 event. Events that fail signature checks, come from keys outside `NOSTR_ALLOWED_PUBKEYS`, or do not address the channel account are dropped. Each sender in a relay channel maps to one conversation thread (`<channel id>/<sender public key>`). Files stay in the app; the reply names them. On every connection Nod receives messages from the last 30 seconds; older messages sent while it was offline are not received.
 
 ## Analytics and feedback
 

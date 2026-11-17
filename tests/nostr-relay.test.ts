@@ -258,16 +258,21 @@ test('answers NIP-42 authentication and restores the subscription', async () => 
   ]);
   assert.ok(verifyEvent(auth));
   socket.message(['OK', auth.id, true, '']);
+  // The relay can close the pre-auth REQ, so an accepted authentication re-subscribes.
+  assert.equal(socket.frames('REQ').length, 2);
 
-  socket.message(['CLOSED', 'nod-nostr-relay', 'auth-required: restricted']);
+  // A CLOSED during an in-flight authentication answer must not tear the connection down.
+  // The confirmation of that answer re-subscribes instead.
   socket.message(['AUTH', 'challenge-2']);
   const again = socket.frames('AUTH')[1][1] as NostrRelayEvent;
   assert.deepEqual(again.tags, [
     ['challenge', 'challenge-2'],
     ['relay', 'wss://relay.example'],
   ]);
+  socket.message(['CLOSED', 'nod-nostr-relay', 'auth-required: restricted']);
+  assert.equal(transport.channels[0].available, true);
   socket.message(['OK', again.id, true, '']);
-  assert.equal(socket.frames('REQ').length, 2);
+  assert.equal(socket.frames('REQ').length, 3);
 
   socket.message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
   assert.equal(transport.channels[0].available, false);
