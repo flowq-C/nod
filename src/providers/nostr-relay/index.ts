@@ -25,7 +25,7 @@ const eventSchema = z.object({
   pubkey: z.string().regex(identityPattern),
   created_at: z.number().int().nonnegative(),
   kind: z.number().int().nonnegative(),
-  tags: z.array(z.array(z.string().max(2048)).max(32)).max(256),
+  tags: z.array(z.array(z.string().max(1024)).max(8)).max(256),
   content: z.string().max(200_000),
   sig: z.string().regex(signaturePattern),
 });
@@ -152,7 +152,7 @@ export function createNostrRelayTransport(
       reason,
     });
   const incoming: InboundMessage[] = [];
-  const pending = new Map<string, (accepted: boolean) => void>();
+  const pending = new Map<string, Set<(accepted: boolean) => void>>();
   let socket: RelaySocket | undefined;
   let authenticating = false;
   let attempt = 0;
@@ -245,9 +245,11 @@ export function createNostrRelayTransport(
     if (type === 'AUTH') return authenticate(current, message[1]);
     if (type === 'OK') {
       const id = typeof message[1] === 'string' ? message[1] : '';
-      const finish = pending.get(id);
-      if (finish) {
-        pending.delete(id);
+      const registered = pending.get(id);
+      const finish = registered?.values().next().value;
+      if (registered && finish) {
+        registered.delete(finish);
+        if (!registered.size) pending.delete(id);
         finish(message[2] === true);
       }
       return;
@@ -269,18 +271,27 @@ export function createNostrRelayTransport(
     accepted?: () => void,
   ) {
     return new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(event.id);
-        reject(new Error('Nostr relay delivery was not confirmed.'));
-      }, publishTimeoutMs);
-      timer.unref();
-      pending.set(event.id, (ok) => {
+      // Two identical posts in the same second share one event id.
+      // Each call registers its own confirmation for that id.
+      const registered = pending.get(event.id) ?? new Set();
+      const finish = (ok: boolean) => {
         clearTimeout(timer);
         if (ok) {
           accepted?.();
           resolve(event.id);
         } else reject(new Error('Nostr relay delivery was not confirmed.'));
-      });
+      };
+      const unregister = () => {
+        registered.delete(finish);
+        if (!registered.size) pending.delete(event.id);
+      };
+      const timer = setTimeout(() => {
+        unregister();
+        reject(new Error('Nostr relay delivery was not confirmed.'));
+      }, publishTimeoutMs);
+      timer.unref();
+      registered.add(finish);
+      pending.set(event.id, registered);
       sendFrame(current, [kind, event]);
     });
   }
@@ -313,7 +324,7 @@ export function createNostrRelayTransport(
     authenticating = false;
     channel.available = false;
     channel.error = message;
-    for (const finish of pending.values()) finish(false);
+    for (const registered of pending.values()) for (const finish of registered) finish(false);
     pending.clear();
     clearTimeout(reconnect);
     reconnect = setTimeout(connect, Math.min(60_000, 1000 * 2 ** Math.min(attempt++, 6)));
@@ -406,7 +417,7 @@ export function createNostrRelayTransport(
       if (closed) return;
       closed = true;
       clearTimeout(reconnect);
-      for (const finish of pending.values()) finish(false);
+      for (const registered of pending.values()) for (const finish of registered) finish(false);
       pending.clear();
       incoming.length = 0;
       const current = socket;

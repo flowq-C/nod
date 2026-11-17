@@ -301,20 +301,56 @@ test('rebuilds the connection and the subscription after the relay closes it', a
   assert.equal(sockets[1].frames('REQ').length, 1);
 });
 
-test('keeps events with many mention tags', async () => {
+test('keeps chat events with protocol tag shapes', async () => {
   const { socket, transport, received, collect } = connectedTransport();
   await transport.poll?.(collect);
   socket.open();
-  const mentions = Array.from({ length: 12 }, (_, index) => ['p', `${index}`.padStart(64, '0')]);
+  const mentions = Array.from({ length: 12 }, (_, index) => [
+    'p',
+    `${index}`.padStart(64, '0'),
+    'wss://relay.example',
+    `Member ${index}`,
+  ]);
   const event = signEvent(senderSecret, {
     kind: 9,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [['h', 'room'], ['p', botIdentity], ...mentions],
+    tags: [
+      ['h', 'room'],
+      ['p', botIdentity],
+      ['e', 'a'.repeat(64), 'wss://relay.example', 'reply'],
+      ...mentions,
+    ],
     content: 'many mentions',
   });
   socket.message(['EVENT', 'sub', event]);
   await transport.poll?.(collect);
   assert.equal(received.length, 1);
+  assert.equal(received[0].replyToMessageId, 'a'.repeat(64));
+});
+
+test('confirms two identical posts in the same second separately', async () => {
+  const { socket, transport, collect } = connectedTransport();
+  await transport.poll?.(collect);
+  socket.open();
+
+  const post = () =>
+    transport.post({
+      channelId: 'nostr',
+      accountId: botIdentity,
+      threadId: `room/${senderIdentity}`,
+      text: 'same',
+    });
+  const first = post();
+  const second = post();
+  const events = socket.frames('EVENT');
+  assert.equal(events.length, 2);
+  const id = (events[0][1] as NostrRelayEvent).id;
+  assert.equal((events[1][1] as NostrRelayEvent).id, id);
+
+  socket.message(['OK', id, true, '']);
+  socket.message(['OK', id, true, '']);
+  assert.deepEqual(await first, { id, ids: [id] });
+  assert.deepEqual(await second, { id, ids: [id] });
 });
 
 test('posts kind 9 replies only after relay confirmation', async () => {
