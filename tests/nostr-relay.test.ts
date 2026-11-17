@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { schnorr } from '@noble/curves/secp256k1.js';
-import type { InboundMessage } from '../src/ports/messaging.ts';
+import type { InboundMessage, MessagingTransport } from '../src/ports/messaging.ts';
+import { combineMessagingTransports } from '../src/providers/chat-sdk/combined.ts';
 import {
   createNostrRelayTransport,
   serializeEvent,
@@ -44,6 +45,7 @@ const environment = () => ({
 
 class FakeSocket implements RelaySocket {
   readyState = 0;
+  closed = false;
   readonly sent: unknown[][] = [];
   private readonly listeners = new Map<string, ((event: SocketFrame) => void)[]>();
 
@@ -56,7 +58,10 @@ class FakeSocket implements RelaySocket {
   }
 
   close() {
+    if (this.closed) return;
+    this.closed = true;
     this.readyState = 3;
+    this.emit('close', {});
   }
 
   open() {
@@ -301,6 +306,38 @@ test('rebuilds the connection and the subscription after the relay closes it', a
   assert.equal(sockets[1].frames('REQ').length, 1);
 });
 
+test('keeps at most one relay connection open across repeated failures', async () => {
+  const sockets: FakeSocket[] = [];
+  const transport = createNostrRelayTransport(environment(), {
+    createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const collect = async (_message: InboundMessage) => {};
+  await transport.poll?.(collect);
+  sockets[0].open();
+  sockets[0].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  sockets[1].open();
+  sockets[1].message(['AUTH', 'challenge']);
+  const auth = sockets[1].frames('AUTH')[0][1] as NostrRelayEvent;
+  sockets[1].message(['OK', auth.id, false, 'denied']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  sockets[2].open();
+  sockets[2].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  sockets[3].open();
+
+  assert.equal(sockets.filter((socket) => !socket.closed).length, 1);
+  await transport.close!();
+  assert.ok(sockets.every((socket) => socket.closed));
+});
+
 test('keeps chat events with protocol tag shapes', async () => {
   const { socket, transport, received, collect } = connectedTransport();
   await transport.poll?.(collect);
@@ -328,7 +365,7 @@ test('keeps chat events with protocol tag shapes', async () => {
   assert.equal(received[0].replyToMessageId, 'a'.repeat(64));
 });
 
-test('confirms two identical posts in the same second separately', async () => {
+test('gives separate sends separate event ids and keeps the id on a retry', async () => {
   const { socket, transport, collect } = connectedTransport();
   await transport.poll?.(collect);
   socket.open();
@@ -344,13 +381,35 @@ test('confirms two identical posts in the same second separately', async () => {
   const second = post();
   const events = socket.frames('EVENT');
   assert.equal(events.length, 2);
-  const id = (events[0][1] as NostrRelayEvent).id;
-  assert.equal((events[1][1] as NostrRelayEvent).id, id);
+  const firstEvent = events[0][1] as NostrRelayEvent;
+  const secondEvent = events[1][1] as NostrRelayEvent;
+  assert.notEqual(firstEvent.id, secondEvent.id);
+  assert.notEqual(firstEvent.tags.at(-1)?.[1], secondEvent.tags.at(-1)?.[1]);
+  socket.message(['OK', firstEvent.id, true, '']);
+  socket.message(['OK', secondEvent.id, true, '']);
+  assert.deepEqual(await first, { id: firstEvent.id, ids: [firstEvent.id] });
+  assert.deepEqual(await second, { id: secondEvent.id, ids: [secondEvent.id] });
 
-  socket.message(['OK', id, true, '']);
-  socket.message(['OK', id, true, '']);
-  assert.deepEqual(await first, { id, ids: [id] });
-  assert.deepEqual(await second, { id, ids: [id] });
+  const failed = transport.post({
+    channelId: 'nostr',
+    accountId: botIdentity,
+    threadId: `room/${senderIdentity}`,
+    text: 'retry me',
+  });
+  const attempt = socket.frames('EVENT')[2][1] as NostrRelayEvent;
+  socket.message(['OK', attempt.id, false, 'blocked']);
+  await assert.rejects(failed, /Nostr relay delivery was not confirmed/);
+
+  const retry = transport.post({
+    channelId: 'nostr',
+    accountId: botIdentity,
+    threadId: `room/${senderIdentity}`,
+    text: 'retry me',
+  });
+  const replay = socket.frames('EVENT')[3][1] as NostrRelayEvent;
+  assert.equal(replay.id, attempt.id);
+  socket.message(['OK', replay.id, true, '']);
+  assert.deepEqual(await retry, { id: attempt.id, ids: [attempt.id] });
 });
 
 test('posts kind 9 replies only after relay confirmation', async () => {
@@ -367,11 +426,14 @@ test('posts kind 9 replies only after relay confirmation', async () => {
   });
   const sent = socket.frames('EVENT')[0][1] as NostrRelayEvent;
   assert.equal(sent.kind, 9);
-  assert.deepEqual(sent.tags, [
+  assert.deepEqual(sent.tags.slice(0, 3), [
     ['h', 'room'],
     ['p', senderIdentity],
     ['e', 'b'.repeat(64), '', 'reply'],
   ]);
+  assert.equal(sent.tags.length, 4);
+  assert.equal(sent.tags[3][0], 'nonce');
+  assert.match(sent.tags[3][1], /^[0-9a-f]{32}$/);
   assert.equal(sent.content, 'done');
   assert.ok(verifyEvent(sent));
   socket.message(['OK', sent.id, true, '']);
@@ -474,4 +536,27 @@ test('does not connect while the channel is not configured', async () => {
     }),
     /The Nostr relay target is unavailable/,
   );
+});
+
+test('channel creation survives an unusable private key and keeps the other channels', () => {
+  const existing: MessagingTransport = {
+    channels: [{ id: 'telegram', status: 'configured', missing: [], allowedSenderIds: ['123'] }],
+    receive: async () => ({ status: 404, body: { error: 'none' } }),
+    post: async () => ({ id: 'x' }),
+    close: async () => {},
+  };
+  for (const broken of [`0${'0'.repeat(63)}`, `f${'f'.repeat(63)}`]) {
+    const transport = combineMessagingTransports(
+      existing,
+      createNostrRelayTransport({ ...environment(), NOSTR_PRIVATE_KEY: broken }),
+    );
+    assert.deepEqual(transport.channels[0], existing.channels[0]);
+    const nostr = transport.channels.find((channel) => channel.id === 'nostr')!;
+    assert.equal(nostr.status, 'setup_required');
+    assert.deepEqual(nostr.missing, ['NOSTR_PRIVATE_KEY']);
+    assert.equal(nostr.accountId, undefined);
+    const disabled = createNostrRelayTransport({ NOSTR_PRIVATE_KEY: broken });
+    assert.equal(disabled.channels[0].status, 'disabled');
+    assert.equal(disabled.channels[0].accountId, undefined);
+  }
 });

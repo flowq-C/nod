@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { z } from 'zod';
 import { logRepeatedFailure } from '../../ports/failure-log.ts';
@@ -102,8 +102,20 @@ function configuration(environment: Environment) {
   ].filter((key) => !env[key]);
   const relayUrl = socketUrl(env.NOSTR_RELAY_URL);
   if (env.NOSTR_RELAY_URL && !relayUrl) missing.push('NOSTR_RELAY_URL');
-  const secretKey = env.NOSTR_PRIVATE_KEY?.toLowerCase();
-  if (secretKey && !identityPattern.test(secretKey)) missing.push('NOSTR_PRIVATE_KEY');
+  const enabled = env.NOSTR_ENABLED === 'true';
+  const rawKey = env.NOSTR_PRIVATE_KEY?.toLowerCase();
+  if (rawKey && !identityPattern.test(rawKey)) missing.push('NOSTR_PRIVATE_KEY');
+  let secretKey = rawKey && identityPattern.test(rawKey) ? rawKey : undefined;
+  let accountId: string | undefined;
+  if (enabled && secretKey) {
+    // Derive only for an enabled channel; an unusable scalar is missing setup.
+    try {
+      accountId = bytesToHex(schnorr.getPublicKey(hexToBytes(secretKey)));
+    } catch {
+      missing.push('NOSTR_PRIVATE_KEY');
+      secretKey = undefined;
+    }
+  }
   const relayChannels = list(env.NOSTR_CHANNELS);
   if (
     env.NOSTR_CHANNELS &&
@@ -116,7 +128,6 @@ function configuration(environment: Environment) {
     (!allowedSenderIds.length || allowedSenderIds.some((key) => !identityPattern.test(key)))
   )
     missing.push('NOSTR_ALLOWED_PUBKEYS');
-  const enabled = env.NOSTR_ENABLED === 'true';
   return {
     status: (!enabled
       ? 'disabled'
@@ -125,7 +136,8 @@ function configuration(environment: Environment) {
         : 'configured') as MessagingChannel['status'],
     missing: enabled ? missing : [],
     relayUrl,
-    secretKey: secretKey && identityPattern.test(secretKey) ? secretKey : undefined,
+    secretKey: enabled ? secretKey : undefined,
+    accountId,
     relayChannels,
     allowedSenderIds,
   };
@@ -136,9 +148,7 @@ export function createNostrRelayTransport(
   options: { createSocket?: (url: string) => RelaySocket } = {},
 ): MessagingTransport {
   const config = configuration(environment);
-  const accountId = config.secretKey
-    ? bytesToHex(schnorr.getPublicKey(hexToBytes(config.secretKey)))
-    : undefined;
+  const accountId = config.accountId;
   const channel: MessagingChannel = {
     id: 'nostr',
     status: config.status,
@@ -153,6 +163,8 @@ export function createNostrRelayTransport(
     });
   const incoming: InboundMessage[] = [];
   const pending = new Map<string, Set<(accepted: boolean) => void>>();
+  const failedSends = new Map<string, NostrRelayEvent>();
+  const openSockets = new Set<RelaySocket>();
   let socket: RelaySocket | undefined;
   let authenticating = false;
   let attempt = 0;
@@ -303,24 +315,45 @@ export function createNostrRelayTransport(
     replyToMessageId: string | undefined,
     text: string,
   ) {
-    const event = signEvent(config.secretKey!, {
-      kind: chatKind,
-      tags: [
-        ['h', relayChannel],
-        ['p', peer],
-        ...(replyToMessageId && identityPattern.test(replyToMessageId)
-          ? [['e', replyToMessageId, '', 'reply']]
-          : []),
-      ],
-      content: text,
-      created_at: Math.floor(Date.now() / 1000),
-    });
-    return confirm(current, event, 'EVENT');
+    const key = JSON.stringify([relayChannel, peer, replyToMessageId ?? '', text]);
+    const replay = failedSends.get(key);
+    failedSends.delete(key);
+    // Every logical send carries its own signed nonce tag.
+    // Two identical sends in one second therefore stay two separate events.
+    // A retry after a failed delivery republishes the same signed event.
+    // Relays then deduplicate on its id.
+    const event =
+      replay ??
+      signEvent(config.secretKey!, {
+        kind: chatKind,
+        tags: [
+          ['h', relayChannel],
+          ['p', peer],
+          ...(replyToMessageId && identityPattern.test(replyToMessageId)
+            ? [['e', replyToMessageId, '', 'reply']]
+            : []),
+          ['nonce', randomBytes(16).toString('hex')],
+        ],
+        content: text,
+        created_at: Math.floor(Date.now() / 1000),
+      });
+    try {
+      return await confirm(current, event, 'EVENT');
+    } catch (error) {
+      failedSends.set(key, event);
+      while (failedSends.size > 100) failedSends.delete(failedSends.keys().next().value!);
+      throw error;
+    }
   }
 
   function disconnect(current: RelaySocket, message: string) {
     if (closed || socket !== current) return;
     socket = undefined;
+    // Retire the superseded socket for real.
+    // A late or synchronous close event re-enters here.
+    // The guard above ends that re-entry because the socket is already gone.
+    openSockets.delete(current);
+    current.close();
     authenticating = false;
     channel.available = false;
     channel.error = message;
@@ -337,6 +370,7 @@ export function createNostrRelayTransport(
       config.relayUrl,
     );
     socket = current;
+    openSockets.add(current);
     authenticating = false;
     current.addEventListener('open', () => {
       if (closed || socket !== current) return;
@@ -420,9 +454,9 @@ export function createNostrRelayTransport(
       for (const registered of pending.values()) for (const finish of registered) finish(false);
       pending.clear();
       incoming.length = 0;
-      const current = socket;
       socket = undefined;
-      current?.close();
+      for (const current of openSockets) current.close();
+      openSockets.clear();
     },
   };
 }
