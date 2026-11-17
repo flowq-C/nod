@@ -398,7 +398,7 @@ export interface Preferences {
   proactivePaused: boolean;
   localFilesEnabled: boolean;
 }
-export type ChannelProvider = 'telegram' | 'whatsapp';
+export type ChannelProvider = 'telegram' | 'whatsapp' | 'nostr';
 export interface ChannelLinkStatus {
   pairingId?: string;
   state:

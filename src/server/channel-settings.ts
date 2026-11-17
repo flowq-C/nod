@@ -18,13 +18,16 @@ import type {
 import type { CredentialKeyStore } from '../ports/key-store.ts';
 import type { ChannelPairingRequest } from '../ports/messaging.ts';
 
-const providerSchema = z.enum(['telegram', 'whatsapp']);
+const providerSchema = z.enum(['telegram', 'whatsapp', 'nostr']);
 export type ChannelConnectionObservation = {
-  channel: ChannelProvider;
+  channel: 'telegram' | 'whatsapp';
   state: 'disabled' | 'setup_pending' | 'connected' | 'configured_unverified';
 };
 
-function managedConfigurationReady(provider: ChannelProvider, values: Record<string, string>) {
+function managedConfigurationReady(
+  provider: 'telegram' | 'whatsapp',
+  values: Record<string, string>,
+) {
   if (provider === 'telegram')
     return (
       /^\d+:[A-Za-z0-9_-]+$/.test(values.TELEGRAM_BOT_TOKEN ?? '') &&
@@ -158,10 +161,17 @@ const fields: Record<ChannelProvider, Set<string>> = {
     'WHATSAPP_ALLOWED_NUMBER',
     'WHATSAPP_VERIFY_TOKEN',
   ]),
+  nostr: new Set([
+    'NOSTR_ENABLED',
+    'NOSTR_RELAY_URL',
+    'NOSTR_PRIVATE_KEY',
+    'NOSTR_CHANNELS',
+    'NOSTR_ALLOWED_PUBKEYS',
+  ]),
 };
 export function managedChannelEnvironment(environment: Record<string, string | undefined>) {
   const managed: Partial<Record<ChannelProvider, Record<string, string>>> = {};
-  for (const provider of ['telegram', 'whatsapp'] as const) {
+  for (const provider of ['telegram', 'whatsapp', 'nostr'] as const) {
     const values = Object.fromEntries(
       [...fields[provider]]
         .filter((name) => !name.includes('_PAIRING_'))
@@ -173,6 +183,10 @@ export function managedChannelEnvironment(environment: Record<string, string | u
     for (const name of [enabled, ...(provider === 'whatsapp' ? ['WHATSAPP_POLICY_CONFIRMED'] : [])])
       if (values[name] !== undefined && !['true', 'false'].includes(values[name]))
         throw new Error(`${name} must be true, false or empty.`);
+    if (provider === 'nostr') {
+      managed[provider] = values;
+      continue;
+    }
     values[enabled] ??= 'true';
     const mode = `${provider.toUpperCase()}_MODE`;
     values[mode] ??= provider === 'telegram' ? 'polling' : 'cloud';
@@ -387,7 +401,7 @@ export async function createChannelSettings(
       observed = options.observed?.();
     } catch {}
     const rows = (await store.read()).filter((row) => !managed[row.provider]);
-    for (const provider of ['telegram', 'whatsapp'] as const) {
+    for (const provider of ['telegram', 'whatsapp', 'nostr'] as const) {
       const values = managed[provider];
       if (!values) continue;
       const mode = values[`${provider.toUpperCase()}_MODE`];
@@ -396,8 +410,12 @@ export async function createChannelSettings(
         provider,
         enabled: values[`${provider.toUpperCase()}_ENABLED`] === 'true',
         managed: true,
-        mode: linked ? 'linked' : mode === 'polling' ? 'polling' : 'webhook',
-        ...(linked ? { linkMode: mode } : {}),
+        ...(provider === 'nostr'
+          ? {}
+          : {
+              mode: linked ? 'linked' : mode === 'polling' ? 'polling' : 'webhook',
+              ...(linked ? { linkMode: mode } : {}),
+            }),
         ...(provider === 'telegram' && telegramUserId.test(values.TELEGRAM_ALLOWED_USER_ID ?? '')
           ? { allowedUserId: values.TELEGRAM_ALLOWED_USER_ID }
           : {}),

@@ -121,7 +121,7 @@ const usageOperations = [
   'synthesize',
 ];
 const protectedLists = ['failures', 'startupLog', 'settings', 'modelSettings', 'channelSettings'];
-const channels = ['web', 'telegram', 'whatsapp'];
+const channels = ['web', 'telegram', 'whatsapp', 'nostr'];
 const efforts = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const outcomes = ['succeeded', 'failed', 'cancelled'];
 const choice = (value: unknown, allowed: readonly string[], fallback = 'unknown') =>

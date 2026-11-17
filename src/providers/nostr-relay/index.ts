@@ -92,7 +92,7 @@ function replyTarget(event: NostrRelayEvent) {
   return (replies.find((tag) => tag[3] === 'reply') ?? replies.at(-1))?.[1];
 }
 
-function configuration(environment: Environment) {
+export function configuration(environment: Environment) {
   const env = { ...environment };
   const missing = [
     'NOSTR_RELAY_URL',

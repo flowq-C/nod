@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { schnorr } from '@noble/curves/secp256k1.js';
+import Fastify from 'fastify';
+import pg from 'pg';
+import { ChannelSetupFailure } from '../src/ports/channel-settings.ts';
 import type { InboundMessage, MessagingTransport } from '../src/ports/messaging.ts';
 import { combineMessagingTransports } from '../src/providers/chat-sdk/combined.ts';
 import {
@@ -14,6 +17,11 @@ import {
   type RelaySocket,
   type SocketFrame,
 } from '../src/providers/nostr-relay/index.ts';
+import { createNostrRelaySetupVerifier } from '../src/providers/nostr-relay/settings.ts';
+import {
+  createChannelSettings,
+  managedChannelEnvironment,
+} from '../src/server/channel-settings.ts';
 
 const bipSecret = `${'0'.repeat(62)}03`;
 const bipPublic = 'f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9';
@@ -789,5 +797,437 @@ test('channel creation survives an unusable private key and keeps the other chan
     const disabled = createNostrRelayTransport({ NOSTR_PRIVATE_KEY: broken });
     assert.equal(disabled.channels[0].status, 'disabled');
     assert.equal(disabled.channels[0].accountId, undefined);
+  }
+});
+
+type SettingsRow = {
+  owner_id: string;
+  provider: string;
+  enabled: boolean;
+  ciphertext: string | null;
+  summary: Record<string, unknown>;
+};
+
+function settingsPool() {
+  const rows: SettingsRow[] = [];
+  const run = async (statement: string, values: unknown[] = []) => {
+    const sql = statement.trim();
+    if (sql.startsWith('INSERT INTO channel_settings')) {
+      const [owner_id, provider, enabled, ciphertext, summary] = values as [
+        string,
+        string,
+        boolean,
+        string | null,
+        string,
+      ];
+      const row: SettingsRow = {
+        owner_id,
+        provider,
+        enabled,
+        ciphertext,
+        summary: JSON.parse(summary),
+      };
+      const index = rows.findIndex(
+        (item) => item.owner_id === owner_id && item.provider === provider,
+      );
+      if (index < 0) rows.push(row);
+      else rows[index] = row;
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.startsWith('SELECT * FROM channel_settings WHERE owner_id'))
+      return { rows: rows.filter((row) => row.owner_id === values[0]), rowCount: 0 };
+    return { rows: [], rowCount: 0 };
+  };
+  return {
+    query: run,
+    async connect() {
+      return { query: run, release() {} };
+    },
+  } as unknown as pg.Pool;
+}
+
+async function until(check: () => boolean) {
+  const deadline = performance.now() + 3000;
+  while (!check()) {
+    if (performance.now() >= deadline)
+      throw new Error('The setup did not reach the expected state.');
+    await sleep(5);
+  }
+}
+
+const setupSubscription = 'nod-nostr-setup';
+const setupInput = {
+  relayUrl: 'https://relay.example',
+  privateKey: botSecret,
+  channels: 'room',
+  allowedPubkeys: senderIdentity,
+};
+
+function setupVerifier() {
+  const sockets: FakeSocket[] = [];
+  const verifier = createNostrRelaySetupVerifier({
+    createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const last = async () => {
+    await until(() => sockets.length > 0);
+    return sockets.at(-1)!;
+  };
+  const accept = async (index: number) => {
+    await until(() => sockets.length > index);
+    const socket = sockets[index];
+    socket.open();
+    socket.message(['EOSE', setupSubscription]);
+  };
+  return { sockets, verifier, last, accept };
+}
+
+test('the relay setup verifies the connection before it saves the settings', async () => {
+  const pool = settingsPool();
+  const { verifier, last } = setupVerifier();
+  const applied: Record<string, string>[] = [];
+  const settings = await createChannelSettings(pool, {
+    ownerId: 'nostr-setup-fixture',
+    keyStore: { id: 'fixture', configured: true, getKey: async () => randomBytes(32) },
+    verifier,
+    apply: async (environment) => {
+      applied.push({ ...environment });
+    },
+  });
+  const app = Fastify();
+  settings.registerRoutes(app);
+  try {
+    const pending = app.inject({
+      method: 'PUT',
+      url: '/api/channel-settings/nostr',
+      payload: { ...setupInput, channels: 'room, hall' },
+    });
+    const socket = await last();
+    socket.open();
+    const request = socket.frames('REQ')[0];
+    assert.equal(request[1], setupSubscription);
+    const filter = request[2] as Record<string, unknown>;
+    assert.deepEqual(filter['#h'], ['room', 'hall']);
+    assert.deepEqual(filter['#p'], [botIdentity]);
+    socket.message(['AUTH', 'setup-challenge']);
+    const auth = socket.frames('AUTH')[0][1] as NostrRelayEvent;
+    assert.equal(auth.kind, 22242);
+    assert.deepEqual(auth.tags, [
+      ['challenge', 'setup-challenge'],
+      ['relay', 'wss://relay.example'],
+    ]);
+    assert.ok(verifyEvent(auth));
+    socket.message(['OK', auth.id, true, '']);
+    assert.equal(socket.frames('REQ').length, 2);
+    socket.message(['EOSE', setupSubscription]);
+    const response = await pending;
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json().channel, {
+      provider: 'nostr',
+      enabled: true,
+      accountName: 'relay.example',
+      accountHandle: 'wss://relay.example',
+    });
+    assert.equal(response.body.includes(botSecret), false);
+    assert.equal(socket.closed, true);
+    const environment = await settings.environment();
+    assert.equal(environment.NOSTR_ENABLED, 'true');
+    assert.equal(environment.NOSTR_RELAY_URL, 'https://relay.example');
+    assert.equal(environment.NOSTR_PRIVATE_KEY, botSecret);
+    assert.equal(environment.NOSTR_CHANNELS, 'room,hall');
+    assert.equal(environment.NOSTR_ALLOWED_PUBKEYS, senderIdentity);
+    assert.deepEqual(applied, [environment]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a refused or failed relay setup keeps its reason and never shows the private key', async () => {
+  const { verifier, last } = setupVerifier();
+  const verify = () => verifier.verify('nostr', setupInput);
+
+  const refused = verify();
+  let socket = await last();
+  socket.open();
+  socket.message(['AUTH', 'challenge-1']);
+  const auth = socket.frames('AUTH')[0][1] as NostrRelayEvent;
+  socket.message(['OK', auth.id, false, `restricted: auth failed ${botSecret}`]);
+  await assert.rejects(refused, (error: Error) => {
+    assert.ok(error instanceof ChannelSetupFailure);
+    assert.equal(error.reason, 'verification_failed');
+    assert.match(error.details ?? '', /restricted: auth failed/);
+    assert.match(error.details ?? '', /\[redacted\]/);
+    assert.equal(error.details?.includes(botSecret), false);
+    return true;
+  });
+
+  const closed = verify();
+  socket = await last();
+  socket.open();
+  socket.message(['CLOSED', setupSubscription, 'auth-required: restricted']);
+  await assert.rejects(closed, (error: Error) => {
+    assert.ok(error instanceof ChannelSetupFailure);
+    assert.equal(error.reason, 'verification_failed');
+    assert.match(error.details ?? '', /auth-required: restricted/);
+    return true;
+  });
+
+  const dropped = verify();
+  socket = await last();
+  socket.close();
+  await assert.rejects(dropped, (error: Error) => {
+    assert.ok(error instanceof ChannelSetupFailure);
+    assert.equal(error.reason, 'verification_failed');
+    assert.match(error.details ?? '', /closed the connection/);
+    return true;
+  });
+});
+
+test('the relay setup validates its input before it opens a connection', async () => {
+  const { sockets, verifier } = setupVerifier();
+  for (const input of [
+    { ...setupInput, relayUrl: 'ftp://relay.example' },
+    { ...setupInput, privateKey: 'not-a-key' },
+    { ...setupInput, channels: ' ' },
+    { ...setupInput, allowedPubkeys: 'not-a-key' },
+    { relayUrl: 'https://relay.example' },
+    { ...setupInput, unexpected: true },
+  ])
+    await assert.rejects(verifier.verify('nostr', input), (error: Error) => {
+      assert.ok(error instanceof ChannelSetupFailure);
+      assert.equal(error.reason, 'invalid_input');
+      assert.ok(error.details);
+      return true;
+    });
+  assert.equal(sockets.length, 0);
+});
+
+test('saved relay settings reload and feed the transport', async () => {
+  const pool = settingsPool();
+  const { verifier, accept } = setupVerifier();
+  const key = randomBytes(32);
+  const keyStore = { id: 'fixture', configured: true, getKey: async () => key };
+  const first = await createChannelSettings(pool, {
+    ownerId: 'nostr-settings-fixture',
+    keyStore,
+    verifier,
+    apply: async () => {},
+  });
+  const app = Fastify();
+  first.registerRoutes(app);
+  try {
+    const index = 0;
+    const pending = app.inject({
+      method: 'PUT',
+      url: '/api/channel-settings/nostr',
+      payload: setupInput,
+    });
+    await accept(index);
+    assert.equal((await pending).statusCode, 200);
+  } finally {
+    await app.close();
+  }
+  const transport = createNostrRelayTransport(await first.environment());
+  assert.equal(transport.channels[0].status, 'configured');
+  assert.equal(transport.channels[0].accountId, botIdentity);
+  assert.deepEqual(transport.channels[0].allowedSenderIds, [senderIdentity]);
+
+  const reloaded = await createChannelSettings(pool, {
+    ownerId: 'nostr-settings-fixture',
+    keyStore,
+    verifier,
+    apply: async () => {},
+  });
+  const status = await reloaded.status();
+  assert.deepEqual(
+    status.channels.find((item) => item.provider === 'nostr'),
+    {
+      provider: 'nostr',
+      enabled: true,
+      accountName: 'relay.example',
+      accountHandle: 'wss://relay.example',
+    },
+  );
+  assert.equal(JSON.stringify(status).includes(botSecret), false);
+  const restored = await reloaded.environment();
+  assert.equal(restored.NOSTR_PRIVATE_KEY, botSecret);
+  assert.equal(createNostrRelayTransport(restored).channels[0].status, 'configured');
+});
+
+test('a managed relay configuration keeps its configured state and shadows saved settings', async () => {
+  const pilot = {
+    NOSTR_ENABLED: 'true',
+    NOSTR_RELAY_URL: 'https://relay.example',
+    NOSTR_PRIVATE_KEY: botSecret,
+    NOSTR_CHANNELS: 'room',
+    NOSTR_ALLOWED_PUBKEYS: senderIdentity,
+  };
+  const pool = settingsPool();
+  const key = randomBytes(32);
+  const keyStore = { id: 'fixture', configured: true, getKey: async () => key };
+  const isolated = await createChannelSettings(pool, {
+    ownerId: 'nostr-env-fixture',
+    keyStore,
+    verifier: setupVerifier().verifier,
+    managed: managedChannelEnvironment(pilot),
+    apply: async () => {},
+  });
+  const environment = await isolated.environment();
+  assert.equal(createNostrRelayTransport(environment).channels[0].status, 'configured');
+  const managedChannel = (await isolated.status()).channels.find(
+    (item) => item.provider === 'nostr',
+  );
+  assert.deepEqual(managedChannel, {
+    provider: 'nostr',
+    enabled: true,
+    managed: true,
+  });
+  assert.equal(JSON.stringify(await isolated.status()).includes(botSecret), false);
+
+  const { verifier, accept } = setupVerifier();
+  const saved = await createChannelSettings(pool, {
+    ownerId: 'nostr-env-fixture',
+    keyStore,
+    verifier,
+    apply: async () => {},
+  });
+  const app = Fastify();
+  saved.registerRoutes(app);
+  try {
+    const index = 0;
+    const pending = app.inject({
+      method: 'PUT',
+      url: '/api/channel-settings/nostr',
+      payload: { ...setupInput, privateKey: senderSecret },
+    });
+    await accept(index);
+    assert.equal((await pending).statusCode, 200);
+  } finally {
+    await app.close();
+  }
+  const shadowing = await createChannelSettings(pool, {
+    ownerId: 'nostr-env-fixture',
+    keyStore: {
+      id: 'fixture',
+      configured: true,
+      getKey: async () => {
+        throw new Error('Managed settings must not decrypt saved credentials.');
+      },
+    },
+    verifier,
+    managed: managedChannelEnvironment(pilot),
+    apply: async () => {
+      throw new Error('Managed settings must not rewrite the environment.');
+    },
+  });
+  const shadowed = await shadowing.environment();
+  assert.equal(shadowed.NOSTR_PRIVATE_KEY, botSecret);
+  assert.equal(shadowed.NOSTR_ALLOWED_PUBKEYS, senderIdentity);
+  assert.equal(createNostrRelayTransport(shadowed).channels[0].status, 'configured');
+  const refuse = Fastify();
+  shadowing.registerRoutes(refuse);
+  try {
+    for (const method of ['PUT', 'DELETE'] as const)
+      assert.equal(
+        (
+          await refuse.inject({
+            method,
+            url: '/api/channel-settings/nostr',
+            ...(method === 'PUT' ? { payload: setupInput } : {}),
+          })
+        ).statusCode,
+        409,
+      );
+  } finally {
+    await refuse.close();
+  }
+});
+
+test('the channel status masking follows the saved and managed configuration', async () => {
+  const pool = settingsPool();
+  const { sockets, verifier, accept } = setupVerifier();
+  const key = randomBytes(32);
+  const keyStore = { id: 'fixture', configured: true, getKey: async () => key };
+  const settings = await createChannelSettings(pool, {
+    ownerId: 'nostr-masking-fixture',
+    keyStore,
+    verifier,
+    apply: async () => {},
+  });
+  const app = Fastify();
+  settings.registerRoutes(app);
+  const save = async (payload: object) => {
+    const index = sockets.length;
+    const pending = app.inject({ method: 'PUT', url: '/api/channel-settings/nostr', payload });
+    await accept(index);
+    return pending;
+  };
+  try {
+    assert.equal(
+      createNostrRelayTransport(await settings.environment()).channels[0].status,
+      'disabled',
+    );
+
+    assert.equal(
+      (
+        await save({
+          relayUrl: setupInput.relayUrl,
+          privateKey: setupInput.privateKey,
+          channels: setupInput.channels,
+        })
+      ).statusCode,
+      200,
+    );
+    const incomplete = createNostrRelayTransport(await settings.environment()).channels[0];
+    assert.equal(incomplete.status, 'setup_required');
+    assert.deepEqual(incomplete.missing, ['NOSTR_ALLOWED_PUBKEYS']);
+
+    assert.equal((await save(setupInput)).statusCode, 200);
+    assert.equal(
+      createNostrRelayTransport(await settings.environment()).channels[0].status,
+      'configured',
+    );
+
+    assert.equal(
+      (await app.inject({ method: 'DELETE', url: '/api/channel-settings/nostr' })).statusCode,
+      200,
+    );
+    assert.equal(
+      createNostrRelayTransport(await settings.environment()).channels[0].status,
+      'disabled',
+    );
+
+    const managed = await createChannelSettings(pool, {
+      ownerId: 'nostr-masking-fixture',
+      keyStore,
+      verifier,
+      managed: managedChannelEnvironment({ NOSTR_ENABLED: 'true' }),
+      apply: async () => {},
+    });
+    const missing = createNostrRelayTransport(await managed.environment()).channels[0];
+    assert.equal(missing.status, 'setup_required');
+    assert.deepEqual([...missing.missing].sort(), [
+      'NOSTR_ALLOWED_PUBKEYS',
+      'NOSTR_CHANNELS',
+      'NOSTR_PRIVATE_KEY',
+      'NOSTR_RELAY_URL',
+    ]);
+
+    const variablesOnly = await createChannelSettings(pool, {
+      ownerId: 'nostr-masking-fixture',
+      keyStore,
+      verifier,
+      managed: managedChannelEnvironment({ NOSTR_RELAY_URL: 'https://relay.example' }),
+      apply: async () => {},
+    });
+    assert.equal(
+      createNostrRelayTransport(await variablesOnly.environment()).channels[0].status,
+      'disabled',
+    );
+  } finally {
+    await app.close();
   }
 });

@@ -238,7 +238,7 @@ export const analyticsEvent = z.discriminatedUnion('event', [
         .object({
           section: z.enum(['account', 'preferences', 'channels', 'models', 'trust', 'memory']),
           operation: z.enum(['update', 'connect_started', 'disconnect']),
-          channel: z.enum(['telegram', 'whatsapp']).optional(),
+          channel: z.enum(['telegram', 'whatsapp', 'nostr']).optional(),
         })
         .strict(),
     })

@@ -156,6 +156,7 @@ export function createChatSdkSetupVerifier(
             },
           };
         }
+        if (provider !== 'whatsapp') throw new ChannelSetupFailure('invalid_input');
         const linked = z
           .object({
             mode: z.enum(['bot', 'self-chat']),

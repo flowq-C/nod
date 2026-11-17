@@ -74,6 +74,7 @@ import { createWhatsAppLinkedTransport } from '../providers/chat-sdk/whatsapp.ts
 import { createNostrRelayTransport } from '../providers/nostr-relay/index.ts';
 import { combineMessagingTransports } from '../providers/chat-sdk/combined.ts';
 import { createChatSdkSetupVerifier } from '../providers/chat-sdk/settings.ts';
+import { createNostrRelaySetupVerifier } from '../providers/nostr-relay/settings.ts';
 import { createContainerBrowserComputer } from '../providers/container-browser/index.ts';
 import {
   createOnePassword,
@@ -307,6 +308,22 @@ export function modelEnvironment(
           ...(env.OPENAI_COMPATIBLE_API_KEY && { key: env.OPENAI_COMPATIBLE_API_KEY }),
         },
       }),
+    },
+  };
+}
+
+function channelSetupVerifier(
+  chatSdk: ChannelSetupVerifier,
+  nostrRelay: ChannelSetupVerifier,
+): ChannelSetupVerifier {
+  return {
+    verify: (provider, input) =>
+      provider === 'nostr' ? nostrRelay.verify(provider, input) : chatSdk.verify(provider, input),
+    register: async (provider, configuration) => {
+      await chatSdk.register?.(provider, configuration);
+    },
+    unregister: async (provider, environment) => {
+      await chatSdk.unregister?.(provider, environment);
     },
   };
 }
@@ -624,7 +641,7 @@ export function createDefaultAdapters(
     trustModel,
     trustDecisions,
     messagingSetup: {
-      verifier: createChatSdkSetupVerifier(),
+      verifier: channelSetupVerifier(createChatSdkSetupVerifier(), createNostrRelaySetupVerifier()),
       managed: managedChannelEnvironment(env),
       create: (environment) => {
         const configured = { ...env, ...environment };

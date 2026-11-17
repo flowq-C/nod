@@ -404,10 +404,13 @@ const settings = (section: SettingsSection, operation: SettingsOperation): Analy
   properties: { section, operation },
 });
 const channel =
-  (operation: SettingsOperation | ((provider: 'telegram' | 'whatsapp') => SettingsOperation)) =>
+  (
+    operation:
+      SettingsOperation | ((provider: 'telegram' | 'whatsapp' | 'nostr') => SettingsOperation),
+  ) =>
   (request: FastifyRequest): AnalyticsEvent | undefined => {
     const provider = z
-      .enum(['telegram', 'whatsapp'])
+      .enum(['telegram', 'whatsapp', 'nostr'])
       .safeParse(
         (request.params as { provider?: string }).provider ??
           (request.routeOptions.url?.includes('/telegram/')
@@ -437,7 +440,7 @@ export const analyticsRoutes = new Map<
   ['PATCH /api/preferences', settings('preferences', 'update')],
   [
     'PUT /api/channel-settings/:provider',
-    channel((provider) => (provider === 'telegram' ? 'connect_started' : 'update')),
+    channel((provider) => (provider === 'whatsapp' ? 'update' : 'connect_started')),
   ],
   ['POST /api/channel-settings/telegram/pairing', channel('connect_started')],
   ['POST /api/channel-settings/telegram/confirm', channel('update')],
