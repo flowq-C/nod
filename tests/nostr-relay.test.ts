@@ -998,8 +998,38 @@ test('a refused or failed relay setup keeps its reason and never shows the priva
   });
 });
 
+test('the relay setup ignores a CLOSED while its authentication is pending', async () => {
+  const { verifier, last } = setupVerifier();
+  const pending = verifier.verify('nostr', setupInput);
+  const socket = await last();
+  socket.open();
+  socket.message(['AUTH', 'setup-challenge']);
+  const auth = socket.frames('AUTH')[0][1] as NostrRelayEvent;
+  socket.message(['CLOSED', setupSubscription, 'auth-required: restricted']);
+  socket.message(['OK', auth.id, true, '']);
+  assert.equal(socket.frames('REQ').length, 2);
+  socket.message(['EOSE', setupSubscription]);
+  const result = await pending;
+  assert.equal(result.environment.NOSTR_CHANNELS, 'room');
+});
+
+test('the relay setup probe requests no stored conversation history', async () => {
+  const { verifier, last } = setupVerifier();
+  const started = Math.floor(Date.now() / 1000);
+  const pending = verifier.verify('nostr', setupInput);
+  const socket = await last();
+  socket.open();
+  const filter = socket.frames('REQ')[0][2] as Record<string, unknown>;
+  socket.message(['EOSE', setupSubscription]);
+  await pending;
+  assert.equal(typeof filter.since, 'number');
+  assert.ok(Number.isInteger(filter.since));
+  assert.ok((filter.since as number) >= started);
+  assert.ok((filter.since as number) <= Math.floor(Date.now() / 1000));
+});
+
 test('an unusable setup value names the field to correct and never an environment name', async () => {
-  const { verifier } = setupVerifier();
+  const { sockets, verifier } = setupVerifier();
   await assert.rejects(
     verifier.verify('nostr', { ...setupInput, relayUrl: 'ftp://relay.example' }),
     (error: Error) => {
@@ -1020,6 +1050,21 @@ test('an unusable setup value names the field to correct and never an environmen
       return true;
     },
   );
+  await assert.rejects(
+    verifier.verify('nostr', {
+      relayUrl: setupInput.relayUrl,
+      privateKey: setupInput.privateKey,
+      channels: setupInput.channels,
+    }),
+    (error: Error) => {
+      assert.ok(error instanceof ChannelSetupFailure);
+      assert.equal(error.reason, 'invalid_input');
+      assert.match(error.details ?? '', /allowed pubkeys/);
+      assert.equal(error.details?.includes('NOSTR_'), false);
+      return true;
+    },
+  );
+  assert.equal(sockets.length, 0);
 });
 
 test('the relay setup validates its input before it opens a connection', async () => {
@@ -1029,6 +1074,7 @@ test('the relay setup validates its input before it opens a connection', async (
     { ...setupInput, privateKey: 'not-a-key' },
     { ...setupInput, channels: ' ' },
     { ...setupInput, allowedPubkeys: 'not-a-key' },
+    { ...setupInput, allowedPubkeys: ' ' },
     { relayUrl: 'https://relay.example' },
     { ...setupInput, unexpected: true },
   ])
@@ -1207,19 +1253,22 @@ test('the channel status masking follows the saved and managed configuration', a
       'disabled',
     );
 
+    const refused = await app.inject({
+      method: 'PUT',
+      url: '/api/channel-settings/nostr',
+      payload: {
+        relayUrl: setupInput.relayUrl,
+        privateKey: setupInput.privateKey,
+        channels: setupInput.channels,
+      },
+    });
+    assert.equal(refused.statusCode, 400);
+    assert.match(String(refused.json().error), /allowed pubkeys/);
+    assert.equal(refused.body.includes(setupInput.privateKey), false);
     assert.equal(
-      (
-        await save({
-          relayUrl: setupInput.relayUrl,
-          privateKey: setupInput.privateKey,
-          channels: setupInput.channels,
-        })
-      ).statusCode,
-      200,
+      createNostrRelayTransport(await settings.environment()).channels[0].status,
+      'disabled',
     );
-    const incomplete = createNostrRelayTransport(await settings.environment()).channels[0];
-    assert.equal(incomplete.status, 'setup_required');
-    assert.deepEqual(incomplete.missing, ['NOSTR_ALLOWED_PUBKEYS']);
 
     assert.equal((await save(setupInput)).statusCode, 200);
     assert.equal(

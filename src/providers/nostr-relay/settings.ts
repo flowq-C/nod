@@ -11,7 +11,7 @@ const inputFields: Record<string, string> = {
   NOSTR_RELAY_URL: 'Enter the relay address as an https, http, wss or ws URL.',
   NOSTR_PRIVATE_KEY: 'Enter the private key as 64 hex characters.',
   NOSTR_CHANNELS: 'Enter the channel IDs as text, such as room.',
-  NOSTR_ALLOWED_PUBKEYS: 'Enter the allowed pubkeys as 64 hex characters or leave the field empty.',
+  NOSTR_ALLOWED_PUBKEYS: 'Enter the allowed pubkeys as 64 hex characters.',
 };
 
 const inputSchema = z
@@ -76,7 +76,12 @@ function probe(
       send([
         'REQ',
         setupSubscription,
-        { kinds: [chatKind], '#h': config.relayChannels, '#p': [config.accountId] },
+        {
+          kinds: [chatKind],
+          '#h': config.relayChannels,
+          '#p': [config.accountId],
+          since: Math.floor(Date.now() / 1000),
+        },
       ]);
     socket.addEventListener('open', subscribe);
     socket.addEventListener('error', () =>
@@ -121,7 +126,7 @@ function probe(
         return;
       }
       if (type === 'EOSE' && message[1] === setupSubscription) return finish();
-      if (type === 'CLOSED' && message[1] === setupSubscription)
+      if (type === 'CLOSED' && message[1] === setupSubscription && !pendingAuthentication)
         return finish(`The relay refused the subscription: ${relayReason(message[2])}`);
     });
   });
@@ -148,14 +153,11 @@ export function createNostrRelaySetupVerifier(
         NOSTR_CHANNELS: value.channels,
         NOSTR_ALLOWED_PUBKEYS: value.allowedPubkeys ?? '',
       });
-      const missing = config.missing.filter(
-        (name) => name !== 'NOSTR_ALLOWED_PUBKEYS' || Boolean(value.allowedPubkeys?.trim()),
-      );
       const relayUrl = config.relayUrl;
       const secretKey = config.secretKey;
       const accountId = config.accountId;
-      if (missing.length || !relayUrl || !secretKey || !accountId) {
-        const wrong = [...new Set(missing.length ? missing : ['NOSTR_PRIVATE_KEY'])];
+      if (config.missing.length || !relayUrl || !secretKey || !accountId) {
+        const wrong = [...new Set(config.missing.length ? config.missing : ['NOSTR_PRIVATE_KEY'])];
         throw new ChannelSetupFailure(
           'invalid_input',
           wrong.map((name) => inputFields[name]).join(' '),

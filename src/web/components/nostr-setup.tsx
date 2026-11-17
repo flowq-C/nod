@@ -30,7 +30,7 @@ export function NostrSetup({
   const filled = [
     Boolean(fields.relayUrl?.trim()),
     Boolean(fields.privateKey?.trim()),
-    Boolean(fields.channels?.trim()) && accepted,
+    Boolean(fields.channels?.trim()) && Boolean(fields.allowedPubkeys?.trim()) && accepted,
   ];
   const complete = filled.every(Boolean);
   const setupError =
@@ -155,9 +155,10 @@ export function NostrSetup({
                       </Field>
                       <Field
                         label="Allowed pubkeys"
-                        hint="Optional. Comma-separated 64-hex pubkeys; Nod answers no one else."
+                        hint="Comma-separated 64-hex pubkeys; Nod answers no one else. At least one is required."
                       >
                         <Input
+                          required
                           spellCheck={false}
                           placeholder="a1b2c3…"
                           data-analytics-private
@@ -174,8 +175,8 @@ export function NostrSetup({
                           onChange={(event) => setAccepted(event.target.checked)}
                         />
                         <span>
-                          Anyone who can post in the channel can reach Nod. Only add channels you
-                          trust.
+                          Only the pubkeys you list can reach Nod; others are dropped. Only add
+                          channels you trust.
                         </span>
                       </label>
                       <div className="nostr-setup-actions">
