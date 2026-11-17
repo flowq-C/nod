@@ -36,6 +36,7 @@ import {
   createErrorRedactor,
   createRedactor,
   createTextRedactor,
+  redactSecretText,
 } from '../src/server/redaction.ts';
 
 test('decision reservations release only requests that did not reach dispatch', async () => {
@@ -1553,7 +1554,6 @@ describe('account routes', () => {
     createAccountSession({
       analytics,
       accounts,
-      origin,
       localUser: { id: 'local-owner', name: 'You', email: null, avatarUrl: null },
       developerIds: new Set(['local-owner']),
       async start() {
@@ -1982,11 +1982,23 @@ describe('account routes', () => {
   });
 
   test('account changes require the same origin and owner and never accept provider or owner input', async (t) => {
-    const f = await fixture();
+    const key = 'k'.repeat(43);
+    const f = await fixture(undefined, undefined, key);
     t.after(() => f.app.close());
-    const headers = { origin };
+    const access = { host: 'localhost:4399', cookie: `nod-access-4399=${key}` };
+    const headers = { ...access, origin };
+    for (const loopback of ['127.0.0.1:4399', '[::1]:4399']) {
+      const response = await f.app.inject({
+        method: 'POST',
+        url: '/api/account/prepare',
+        headers: { ...access, host: loopback, origin: `http://${loopback}` },
+        payload: {},
+      });
+      assert.equal(response.statusCode, 200);
+    }
     for (const input of [
-      { headers: { origin: 'https://foreign.example.test' }, payload: {}, status: 403 },
+      { headers: { ...access, origin: 'https://foreign.example.test' }, payload: {}, status: 403 },
+      { headers: { host: access.host, origin }, payload: {}, status: 401 },
       { headers: { ...headers, 'sec-fetch-site': 'cross-site' }, payload: {}, status: 403 },
       { headers: { ...headers, 'x-nod-account': 'sam' }, payload: {}, status: 401 },
       { headers, payload: { ownerId: 'sam' }, status: 400 },
@@ -2631,6 +2643,15 @@ test('secret redaction finishes for long malformed Basic credentials', async () 
     ],
     { timeout: 5000 },
   );
+});
+
+test('secret redaction hides every bearer token character', () => {
+  assert.equal(
+    redactSecretText('Rejected Bearer synthetic~private+token/1== for this client'),
+    'Rejected [redacted] for this client',
+  );
+  const basic = Buffer.from('synthetic-user:synthetic-password').toString('base64');
+  assert.equal(redactSecretText(`Rejected Basic ${basic}~tail`), 'Rejected [redacted]~tail');
 });
 
 test('secret redaction keeps valid tokens when another token is missing', () => {
@@ -6485,7 +6506,6 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     createAccountSession({
       accounts,
       analytics: f.analytics,
-      origin: 'http://localhost:4399',
       localUser: { id: f.owner, name: 'Synthetic Owner', email: null, avatarUrl: null },
     }).register(app);
     const session = async () => {
@@ -6538,7 +6558,6 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     createAccountSession({
       accounts: createAccountStore(f.database),
       analytics: f.analytics,
-      origin: 'http://localhost:4399',
       localUser: { id: f.owner, name: 'Synthetic Owner', email: null, avatarUrl: null },
     }).register(restarted);
     const after = await restarted.inject({ method: 'GET', url: '/api/session' });
@@ -6907,7 +6926,6 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
         },
       },
       analytics: f.analytics,
-      origin,
       traces: true,
       localUser: { id: f.owner, name: 'Synthetic Owner', email: null, avatarUrl: null },
     }).register(app);

@@ -3364,57 +3364,70 @@ async function chatgptIssuer() {
   };
 }
 
-test('ChatGPT sign-in listens only on a free loopback callback before requesting tokens', async (t) => {
+test('ChatGPT sign-in uses another free loopback port when 1455 cannot be opened', async (t) => {
   const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
-  const { createServer, Server } = await import('node:http');
-  const blocker = createServer();
-  await new Promise<void>((resolve, reject) => {
-    blocker.once('error', reject);
-    blocker.listen(0, '127.0.0.1', resolve);
-  });
-  const port = (blocker.address() as import('node:net').AddressInfo).port;
+  const { Server } = await import('node:http');
   const listen = Server.prototype.listen;
   const owned: import('node:http').Server[] = [];
+  const ports: unknown[] = [];
+  let refusal = 'EADDRINUSE';
   t.mock.method(
     Server.prototype,
     'listen',
     function (this: import('node:http').Server, ...args: unknown[]) {
-      assert.deepEqual(args.slice(0, 2), [1455, '127.0.0.1']);
-      args[0] = port;
+      ports.push(args[0]);
       owned.push(this);
+      if (args[0] === 1455) {
+        process.nextTick(() =>
+          this.emit('error', Object.assign(new Error(`listen ${refusal}`), { code: refusal })),
+        );
+        return this;
+      }
       return Reflect.apply(listen, this, args);
     },
   );
-  let requests = 0;
-  t.mock.method(globalThis, 'fetch', async () => {
-    requests++;
+  const originalFetch = globalThis.fetch;
+  let exchanges = 0;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (new URL(String(input)).hostname === '127.0.0.1') return originalFetch(input, init);
+    exchanges++;
     throw new Error('Unexpected network request');
   });
-  const controller = new AbortController();
-  let flow:
-    Awaited<ReturnType<import('../src/ports/models.ts').ModelBackend['signIn']>> | undefined;
-  t.after(async () => {
-    controller.abort();
-    await flow?.result.catch(() => {});
-    for (const server of owned) {
-      server.closeAllConnections();
-      server.close();
-    }
-    await new Promise<void>((resolve) => blocker.close(() => resolve()));
-  });
-  await assert.rejects(
-    createPiModelBackend()
-      .signIn({ signal: controller.signal, hostId: chatgptHostId })
-      .then((value) => {
-        flow = value;
-        return value;
-      }),
-    /already in use/,
-  );
-  assert.equal(flow, undefined);
-  assert.equal(requests, 0);
-  assert.ok(owned.every((server) => !server.listening));
-  assert.equal(blocker.listening, true);
+  for (const code of ['EADDRINUSE', 'EACCES']) {
+    refusal = code;
+    ports.length = 0;
+    const controller = new AbortController();
+    const flow = await createPiModelBackend().signIn({
+      signal: controller.signal,
+      hostId: chatgptHostId,
+    });
+    t.after(async () => {
+      controller.abort();
+      await flow.result.catch(() => {});
+    });
+    assert.deepEqual(ports, [1455, 0], code);
+    const redirect = new URL(new URL(flow.url).searchParams.get('redirect_uri')!);
+    const listening = owned.at(-1)!;
+    assert.equal(listening.listening, true, code);
+    assert.equal(
+      redirect.href,
+      `http://127.0.0.1:${(listening.address() as import('node:net').AddressInfo).port}/auth/callback`,
+      code,
+    );
+    assert.notEqual(redirect.port, '1455', code);
+    assert.equal(exchanges, 0, code);
+    redirect.search = new URLSearchParams({
+      state: flow.state,
+      code: 'fixture-code',
+      client_id: 'fixture-client',
+    }).toString();
+    const response = await fetch(redirect, { headers: { connection: 'close' } });
+    await response.text();
+    await assert.rejects(flow.result, /didn’t finish/, code);
+    assert.equal(exchanges, 1, code);
+    assert.equal(listening.listening, false, code);
+    exchanges = 0;
+  }
 });
 
 test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the account and drains cancellation', async (t) => {
@@ -3426,6 +3439,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
   const servers: import('node:http').Server[] = [];
   let port = 0;
   let abortOnListen: AbortController | undefined;
+  const redirect = (flow: { url: string }) => new URL(flow.url).searchParams.get('redirect_uri')!;
   t.mock.method(
     Server.prototype,
     'listen',
@@ -3534,7 +3548,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
   );
   assert.equal(authorization.searchParams.get('code_challenge_method'), 'S256');
   const callback = new URL(authorization.searchParams.get('redirect_uri')!);
-  assert.equal(callback.href, 'http://127.0.0.1:1455/auth/callback');
+  assert.equal(callback.href, `http://127.0.0.1:${port}/auth/callback`);
   callback.search = new URLSearchParams({
     state: signIn.state,
     code: 'fixture-code',
@@ -3582,7 +3596,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
   assert.equal(grants.length, 1);
   assert.equal(grants[0].get('grant_type'), 'authorization_code');
   assert.equal(grants[0].get('client_id'), 'fixture-client');
-  assert.equal(grants[0].get('redirect_uri'), 'http://127.0.0.1:1455/auth/callback');
+  assert.equal(grants[0].get('redirect_uri'), callback.origin + callback.pathname);
   assert.equal(grants[0].get('resource'), 'https://api.openai.com/v1');
   assert.equal(
     createHash('sha256').update(grants[0].get('code_verifier')!).digest('base64url'),
@@ -3593,9 +3607,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
 
   const manual = await start();
   manual.complete(
-    new URL(
-      `http://127.0.0.1:1455/auth/callback?state=${manual.state}&code=manual-code&client_id=fixture-client`,
-    ),
+    new URL(`${redirect(manual)}?state=${manual.state}&code=manual-code&client_id=fixture-client`),
   );
   assert.equal((await manual.result).type, 'oauth');
   assert.equal(grants.at(-1)!.get('code'), 'manual-code');
@@ -3614,15 +3626,13 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
     () =>
       reconnect.complete(
         new URL(
-          `http://127.0.0.1:1455/auth/callback?state=${reconnect.state}&code=fixture-code&client_id=other-client`,
+          `${redirect(reconnect)}?state=${reconnect.state}&code=fixture-code&client_id=other-client`,
         ),
       ),
     ModelAuthError,
   );
   identity.subject = 'fixture-other-owner';
-  reconnect.complete(
-    new URL(`http://127.0.0.1:1455/auth/callback?state=${reconnect.state}&code=fixture-code`),
-  );
+  reconnect.complete(new URL(`${redirect(reconnect)}?state=${reconnect.state}&code=fixture-code`));
   await assert.rejects(reconnect.result, /different ChatGPT account/);
   assert.equal(grants.at(-1)!.get('client_id'), 'fixture-client');
 
@@ -3632,9 +3642,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
     if (failure === 'audience') identity.audience = 'fixture-other-client';
     if (failure === 'scope') scope = 'openid profile email offline_access';
     flow.complete(
-      new URL(
-        `http://127.0.0.1:1455/auth/callback?state=${flow.state}&code=fixture-code&client_id=fixture-client`,
-      ),
+      new URL(`${redirect(flow)}?state=${flow.state}&code=fixture-code&client_id=fixture-client`),
     );
     await assert.rejects(flow.result, (error: Error) => {
       assert.ok(error instanceof ModelAuthError);
@@ -3677,9 +3685,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
   tokenStatus = 403;
   const denied = await start();
   denied.complete(
-    new URL(
-      `http://127.0.0.1:1455/auth/callback?state=${denied.state}&code=denied-code&client_id=fixture-client`,
-    ),
+    new URL(`${redirect(denied)}?state=${denied.state}&code=denied-code&client_id=fixture-client`),
   );
   await assert.rejects(denied.result, (error: Error) => {
     assert.ok(error instanceof ModelAuthError);
@@ -3692,7 +3698,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
   const refused = await start();
   refused.complete(
     new URL(
-      `http://127.0.0.1:1455/auth/callback?state=${refused.state}&code=refused-code&client_id=fixture-client`,
+      `${redirect(refused)}?state=${refused.state}&code=refused-code&client_id=fixture-client`,
     ),
   );
   await assert.rejects(refused.result, (error: Error) => {
@@ -3712,7 +3718,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
   const throttled = await start();
   throttled.complete(
     new URL(
-      `http://127.0.0.1:1455/auth/callback?state=${throttled.state}&code=throttled-code&client_id=fixture-client`,
+      `${redirect(throttled)}?state=${throttled.state}&code=throttled-code&client_id=fixture-client`,
     ),
   );
   await assert.rejects(throttled.result, (error: Error) => {
@@ -3730,7 +3736,7 @@ test('ChatGPT sign-in validates callbacks, exchanges PKCE once, verifies the acc
   const active = await start(interrupted.signal);
   active.complete(
     new URL(
-      `http://127.0.0.1:1455/auth/callback?state=${active.state}&code=interrupted-code&client_id=fixture-client`,
+      `${redirect(active)}?state=${active.state}&code=interrupted-code&client_id=fixture-client`,
     ),
   );
   await started;
@@ -3891,6 +3897,11 @@ test('each model call yields one chat-format trace without image data', async ()
   assert.deepEqual(trace.tools, ['fixture_tool']);
   assert.equal(trace.usage.outputTokens, 3);
   assert.equal(trace.metadata.session_id, 'fixture-session');
+  assert.equal(trace.metadata.request_kind, 'regular');
+  assert.equal(
+    piModelTrace({ ...calls[0], request: undefined }, {}).metadata.request_kind,
+    undefined,
+  );
   assert.ok(!JSON.stringify(trace).includes(image));
   const { untrustedBlock } = await import('../src/shared/untrusted.ts');
   const result = (toolCallId: string, toolName: string, text: string) => ({
@@ -4049,6 +4060,7 @@ test('a long tool call does not send model requests without usage records', asyn
         status?: string;
         costUsd?: number | null;
       }> = [];
+      const traces: import('../src/ports/traces.ts').ModelTrace[] = [];
       let holdRefresh = false;
       let refreshStarted: (() => void) | undefined;
       let releaseRefresh: (() => void) | undefined;
@@ -4168,6 +4180,7 @@ test('a long tool call does not send model requests without usage records', asyn
         provider: 'compatible',
         sessionRoot,
         resolve: async () => access,
+        traces: { active: () => true, record: (trace) => traces.push(trace) },
         createSession: async (options) => {
           const result = await createAgentSession(options);
           current = result.session;
@@ -4222,10 +4235,20 @@ test('a long tool call does not send model requests without usage records', asyn
       });
       await session.prompt('Run the synthetic wait.', []);
       await session.dispose();
+      await new Promise((resolve) => setImmediate(resolve));
       assert.equal(tools, 1);
       assert.equal(realRequests, 2);
       assert.ok(requests > realRequests);
       assert.equal(usage.length, requests);
+      assert.equal(traces.length, requests);
+      assert.equal(
+        traces.filter((trace) => trace.metadata.request_kind === 'regular').length,
+        realRequests,
+      );
+      assert.equal(
+        traces.filter((trace) => trace.metadata.request_kind === 'cache_warm').length,
+        requests - realRequests,
+      );
       assert.equal(new Set(usage.map((row) => row.id)).size, requests);
       const refreshes = usage.filter((row) => row.operation === 'cache_warm');
       assert.equal(refreshes.length, requests - realRequests);
@@ -5125,7 +5148,7 @@ test('a loaded schema that exceeds the request budget returns to deferred tools'
   assert.ok(sources.some((source) => source.includes(description)));
 });
 
-test('a tool loaded in one turn stays declared in the next turn of the session', async (t) => {
+test('loaded tools stay available across turns until they are removed', async (t) => {
   const { bodies, url, close } = await contextRecoveryServer(0, 1, -1, false, undefined, [
     { name: 'nod_tool_search', args: { query: 'synthetic_lookup', limit: 1 } },
     { name: 'synthetic_lookup', args: {} },
@@ -5148,25 +5171,28 @@ test('a tool loaded in one turn stays declared in the next turn of the session',
   const declared = (body: (typeof bodies)[number]) =>
     (body.tools ?? []).map((tool) => (tool as { function: { name: string } }).function.name);
   const events: AgentEvent[] = [];
-  for (const text of ['Look up the synthetic record.', 'Look it up again.']) {
+  for (const text of ['Look up the synthetic record.', 'Look it up again.', 'The tool is gone.']) {
     const session = await agent.open({
       ...fakeExecution(threadId),
       restricted: true,
       systemPrompt: 'Use synthetic tools.',
       workspace,
       runTool: async (_name, _params, run) => run(),
-      tools: [
-        {
-          name: 'synthetic_lookup',
-          description: 'Look up the synthetic record.',
-          deferred: { namespace: 'synthetic', description: 'Synthetic tools.' },
-          parameters: Type.Object({}),
-          execute: async () => {
-            lookups++;
-            return { content: [{ type: 'text', text: 'Synthetic record.' }] };
-          },
-        },
-      ],
+      tools:
+        text === 'The tool is gone.'
+          ? []
+          : [
+              {
+                name: 'synthetic_lookup',
+                description: 'Look up the synthetic record.',
+                deferred: { namespace: 'synthetic', description: 'Synthetic tools.' },
+                parameters: Type.Object({}),
+                execute: async () => {
+                  lookups++;
+                  return { content: [{ type: 'text', text: 'Synthetic record.' }] };
+                },
+              },
+            ],
       shouldStop: () => false,
       onEvent: (event) => events.push(event),
     });
@@ -5175,9 +5201,11 @@ test('a tool loaded in one turn stays declared in the next turn of the session',
   }
   assert.ok(!events.some((event) => event.type === 'error'));
   assert.equal(lookups, 1);
-  assert.equal(bodies.length, 4);
+  assert.equal(bodies.length, 5);
   assert.ok(!declared(bodies[0]!).includes('synthetic_lookup'));
   assert.ok(declared(bodies[3]!).includes('synthetic_lookup'));
+  assert.ok(!declared(bodies[4]!).includes('synthetic_lookup'));
+  assert.ok(JSON.stringify(bodies[4]!.messages).includes('synthetic_lookup'));
 });
 
 test('a failed request cannot remain inside a compaction checkpoint', async (t) => {
@@ -6897,8 +6925,10 @@ test('the live line shows a model retry and the text before a tool call while th
   const shown = new Promise<'step'>((resolve) => (stepShown = () => resolve('step')));
   let released: 'step' | 'timeout' | undefined;
   let requests = 0;
+  const exposedTools = new Set<string>();
   const server = createServer((request, response) => {
-    request.resume();
+    let body = '';
+    request.on('data', (chunk) => (body += chunk));
     request.on('end', async () => {
       const send = (delta: object, finish?: string) =>
         response.write(
@@ -6912,12 +6942,13 @@ test('the live line shows a model retry and the text before a tool call while th
         );
       if (request.url === '/v1/models')
         return response.end(
-          JSON.stringify({ data: [{ id: 'fixture-qwen', context_length: 32_768 }] }),
+          JSON.stringify({ data: [{ id: 'fixture-qwen', context_length: 131_072 }] }),
         );
       if (request.url !== '/v1/chat/completions') {
         response.writeHead(404);
         return response.end('{}');
       }
+      for (const tool of JSON.parse(body).tools ?? []) exposedTools.add(tool.function.name);
       if (++requests === 1) {
         response.writeHead(503, { 'content-type': 'application/json' });
         return response.end(
@@ -7006,6 +7037,7 @@ test('the live line shows a model retry and the text before a tool call while th
   assert.equal(released, 'step');
   assert.equal(scripts.filter((script) => script.includes('fixture-read-notes')).length, 1);
   assert.equal(requests, 4);
+  assert.equal(exposedTools.has('set_status'), false);
   assert.ok(emitted.find(([type]) => type === 'retry')?.[1].includes(definition.choice.name));
 });
 
