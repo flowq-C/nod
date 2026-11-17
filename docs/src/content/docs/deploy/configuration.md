@@ -176,6 +176,8 @@ To switch to polling, remove the webhook with Telegram's [deleteWebhook method](
 
 ### Nostr relay
 
+Only `NOSTR_ENABLED=true` enables the channel. The other variables alone leave it disabled.
+
 Nod connects to `NOSTR_RELAY_URL` and subscribes to chat events (kind 9) in the channels of `NOSTR_CHANNELS` that address the channel account (`p` tag). It signs its replies with `NOSTR_PRIVATE_KEY` (BIP340) and answers in the same channel. The relay challenges the connection with NIP-42 authentication, answered by a signed kind 22242 event. Events that fail signature checks, come from keys outside `NOSTR_ALLOWED_PUBKEYS`, or do not address the channel account are dropped. Each sender in a relay channel maps to one conversation thread (`<channel id>/<sender public key>`). Files stay in the app; the reply names them. On every connection Nod receives messages from the last 30 seconds; older messages sent while it was offline are not received.
 
 ## Analytics and feedback
