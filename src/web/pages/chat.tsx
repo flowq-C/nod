@@ -379,7 +379,7 @@ export function Chat({
   const [replyTo, setReplyTo] = useState<ComposerReply | null | undefined>(null);
   const [replyNotice, setReplyNotice] = useState('');
   const [unavailableQuestions, setUnavailableQuestions] = useState<ReadonlySet<string>>(new Set());
-  useEffect(() => setReplyNotice(''), [text, replyTo?.id]);
+  useEffect(() => setReplyNotice(''), [text, state.threadId]);
   const taskReply = useRef<string | null>(null);
   const [focusTarget, setFocusTarget] = useState<{
     id: string;
@@ -2491,7 +2491,7 @@ export function Chat({
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={!connected || sending || recovering}
+                  disabled={!connected || sending || Boolean(chatWork) || recovering}
                   onClick={async () => {
                     const expectedThread = threadId;
                     setRecovering(true);

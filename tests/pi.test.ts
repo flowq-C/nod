@@ -5884,6 +5884,8 @@ test('Pi retries temporary token errors without context compaction', async (t) =
     ['429 Too many tokens for this account. Please wait.', 2, false],
     ['Fixture API error (429): Too many tokens.', 2, true],
     ['Too many tokens. (HTTP 429)', 2, false],
+    ['Too many tokens. (HTTP 429) [request phase: response]', 2, false],
+    ['Too many tokens. (HTTP 503) (transport cause: ECONNRESET) [request phase: stream]', 2, false],
     ['503 Too many tokens while the service is unavailable.', 2, false],
     ['401 Too many tokens. The credential is invalid.', 1, false],
     ['429 {"code":"insufficient_quota","message":"Too many tokens"}', 1, false],

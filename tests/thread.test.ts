@@ -6259,6 +6259,45 @@ test(
       );
 
       await t.test(
+        'a successful reply clears an earlier context failure without a restart',
+        async () => {
+          await waitFor(settledThread);
+          const question = await thread.submitUserMessage('ask-question');
+          await waitFor(settled(question.turnId));
+          const prompt = 'Synthetic context failure before a successful answer';
+          modelErrors.set(prompt, new ContextLimitError('Synthetic context window exceeded.'));
+          try {
+            const failed = await thread.submitUserMessage(prompt);
+            await waitFor(settled(failed.turnId));
+            const state = (await request('GET', '/api/state')).json();
+            assert.deepEqual(state.chatRecovery, { turnId: failed.turnId });
+            const asked = state.messages.find(
+              (message: { role: string; turnId: string }) =>
+                message.role === 'assistant' && message.turnId === question.turnId,
+            );
+            assert.ok(asked);
+            const answer = await thread.submitUserMessage('Synthetic successful answer', [], {
+              replyToMessageId: asked.id,
+            });
+            await waitFor(settled(answer.turnId));
+            assert.equal(await turnStatus(answer.turnId), 'succeeded');
+            assert.equal((await request('GET', '/api/state')).json().chatRecovery, undefined);
+            assert.equal(
+              (
+                await request('POST', '/api/conversation/restart-context', {
+                  threadId: failed.threadId,
+                  turnId: failed.turnId,
+                })
+              ).statusCode,
+              409,
+            );
+          } finally {
+            modelErrors.delete(prompt);
+          }
+        },
+      );
+
+      await t.test(
         'a context restart keeps chat, files and independent work and refuses stale requests',
         async () => {
           await waitFor(settledThread);

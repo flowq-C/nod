@@ -1,5 +1,5 @@
 diff --git a/dist/utils/overflow.js b/dist/utils/overflow.js
-index a106f863ccb322b58090f1c4ba82d62b0b2723f2..1de28be1c7c5e391bcf0fb5849ced9533e5a3b8c 100644
+index a106f863ccb322b58090f1c4ba82d62b0b2723f2..ac8fb374d7d17dd63e6239eca8d58b5289e08bed 100644
 --- a/dist/utils/overflow.js
 +++ b/dist/utils/overflow.js
 @@ -76,6 +76,10 @@ const CEREBRAS_BODYLESS_OVERFLOW_PATTERN = /^4(?:00|13)\s*(?:status code)?\s*\(n
@@ -7,7 +7,7 @@ index a106f863ccb322b58090f1c4ba82d62b0b2723f2..1de28be1c7c5e391bcf0fb5849ced953
   */
  const NON_OVERFLOW_PATTERNS = [
 +    /^(?:[\w -]+ API error \((?:401|402|403|404|408|409|410|429|5\d\d)\):|(?:401|402|403|404|408|409|410|429|5\d\d)(?:\s|:|$))/i,
-+    /\(HTTP (?:401|402|403|404|408|409|410|429|5\d\d)\)\s*$/i,
++    /\(HTTP (?:401|402|403|404|408|409|410|429|5\d\d)\)(?: \(transport cause: [^)]+\))?(?: \[request phase: [^\]]+\])?\s*$/i,
 +    /\b(?:insufficient_quota|quota_exceeded|usage_limit_reached)\b/i,
 +    /\b(?:tokens? per (?:minute|day)|[tr]p[md])\b/i,
      /^(Throttling error|Service unavailable):/i, // AWS Bedrock non-overflow errors (human-readable prefixes from formatBedrockError)
