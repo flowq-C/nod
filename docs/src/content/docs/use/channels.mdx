@@ -1,19 +1,19 @@
 ---
-title: Telegram and WhatsApp
-description: Chat with Nod from Telegram or WhatsApp, set up each channel, and finish private steps such as sign-in and payments in the Nod app.
+title: Telegram, WhatsApp and Buzz
+description: Chat with Nod from Telegram, WhatsApp or Buzz, set up each channel, and finish private steps such as sign-in and payments in the Nod app.
 sidebar:
   order: 7
 ---
 
 import { Steps, TabItem, Tabs } from '@astrojs/starlight/components';
 
-You can chat with Nod from Telegram or WhatsApp. It's the same conversation, memory and tasks as in the Nod app.
+You can chat with Nod from Telegram, WhatsApp or Buzz. It's the same conversation, memory and tasks as in the Nod app.
 
 With the desktop app's local assistant, channels reply only while Nod runs on an awake computer with an internet connection and the channel connected. Closing the window keeps Nod running. Quitting Nod or sleeping the computer stops live replies. Messages sent while Nod is stopped may arrive after it restarts and reconnects, but Nod does not read old WhatsApp history. If no reply appears, send the message again.
 
 With a [self-hosted server](/deploy/self-host/), channels stay connected while the server runs. You can close the web or desktop app.
 
-If the desktop app runs Nod, quitting it stops Telegram and WhatsApp replies. The computer must stay awake. Reconnect cannot receive messages while Nod is stopped.
+If the desktop app runs Nod, quitting it stops Telegram, WhatsApp and Buzz replies. The computer must stay awake. Reconnect cannot receive messages while Nod is stopped.
 
 Nod replies in the app you wrote from. A message from Telegram gets its answer on Telegram, and a schedule you set up there sends its results there too. Everything also shows in the chat in the Nod app.
 
@@ -21,13 +21,13 @@ Nod uses your conversation language for pairing notices and private-step guidanc
 
 ## Before you start
 
-|                     | Telegram                            | WhatsApp with a QR code                     |
-| ------------------- | ----------------------------------- | ------------------------------------------- |
-| You need            | A Telegram bot, made with BotFather | A registered WhatsApp account               |
-| Works on a laptop   | Yes                                 | Yes                                         |
-| Who can message Nod | Only the Telegram account you pair  | Your personal number, or your own self-chat |
-| Files from Nod      | Images, documents, video and audio  | Images, documents, video and audio          |
-| When Nod can write  | While Nod runs                      | While Nod runs and WhatsApp is connected    |
+|                     | Telegram                            | WhatsApp with a QR code                     | Buzz                             |
+| ------------------- | ----------------------------------- | ------------------------------------------- | -------------------------------- |
+| You need            | A Telegram bot, made with BotFather | A registered WhatsApp account               | A Nostr relay, such as your Buzz |
+| Works on a laptop   | Yes                                 | Yes                                         | Yes                              |
+| Who can message Nod | Only the Telegram account you pair  | Your personal number, or your own self-chat | Only the pubkeys you list        |
+| Files from Nod      | Images, documents, video and audio  | Images, documents, video and audio          | No files; the reply names them   |
+| When Nod can write  | While Nod runs                      | While Nod runs and WhatsApp is connected    | While Nod runs                   |
 
 The QR connection does not need a Meta developer account, an API token, or a public callback address. It uses Baileys, an unofficial WhatsApp client, so there's a small risk of account restrictions, and a WhatsApp update can break the connection for a while. Nod only messages you. A separate bot number keeps your own chats safe. Check the WhatsApp terms before you connect.
 
@@ -35,7 +35,7 @@ Replies keep their bold text, lists, links, quotes, and code. A table arrives as
 
 ## Set up a channel
 
-Open **Channels** in the sidebar, then select **Connect** on Telegram or WhatsApp. Nod checks your details before it saves them, and keeps them encrypted, outside the chat.
+Open **Channels** in the sidebar, then select **Connect** on Telegram, WhatsApp or Buzz. Nod checks your details before it saves them, and keeps them encrypted, outside the chat.
 
 If Telegram or the WhatsApp Cloud API rejects setup, Nod shows the service's HTTP status and reason. Submitted tokens and secrets are replaced with `[redacted]`. If webhook registration fails after setup was saved, the error also states that message delivery is unconfirmed.
 
@@ -93,6 +93,21 @@ Cloud API mode needs a [self-hosted server](/deploy/self-host/) with public HTTP
 </details>
 
 </TabItem>
+<TabItem label="Buzz">
+
+<Steps>
+
+1. Open your Buzz settings and copy its address.
+2. In **Add your Buzz**, select **I have my address**, paste the address into **Relay URL**, then select **Continue**.
+3. In **Add key**, select **I have my key**, paste the private key of the account Nod should use, then select **Continue**.
+4. In **Choose channels**, enter the channel IDs Nod listens in and, optionally, the pubkeys it answers. Tick the channel notice, then select **Continue**.
+5. In **Confirm**, select **Connect Buzz**. Nod answers in this channel.
+
+</Steps>
+
+Nod checks the relay connection before it saves the settings, and keeps the private key encrypted. The channel speaks the Nostr protocol. Only the pubkeys you list can message Nod; others are dropped. Files stay in the app and the reply names them. On every connection Nod receives messages from the last 30 seconds.
+
+</TabItem>
 </Tabs>
 
 <details>
@@ -144,7 +159,7 @@ Nod saves the WhatsApp device keys encrypted in its database. The keys stay on t
 
 After a restart or network loss, Nod uses the saved link to connect again. Replies that have not started sending wait while WhatsApp is disconnected. A send with an unclear result is not repeated automatically. This prevents duplicate messages; check Nod if a reply does not arrive.
 
-If messages stop, open **Channels** and select **Reconnect** for Telegram or WhatsApp. Nod restarts message delivery with the saved settings. It keeps your paired Telegram account and saved WhatsApp device keys. A saved Telegram webhook is registered again. Telegram polling errors show the service's status and reason on this page.
+If messages stop, open **Channels** and select **Reconnect** for Telegram, WhatsApp or Buzz. Nod restarts message delivery with the saved settings. It keeps your paired Telegram account and saved WhatsApp device keys. A saved Telegram webhook is registered again. Telegram polling errors show the service's status and reason on this page.
 
 **Reconnect** also works for server-managed channels. Their settings still come from the server environment. For WhatsApp, the connection panel opens after reconnecting. If WhatsApp has signed out the device, select **Start again** and scan a new code.
 

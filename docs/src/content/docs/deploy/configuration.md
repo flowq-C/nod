@@ -149,7 +149,7 @@ Set `TELEGRAM_ENABLED=false` or `WHATSAPP_ENABLED=false` to disable a channel ex
 | `WHATSAPP_PHONE_NUMBER_ID`      | The ID of the business sender number.                                                                                            | Empty                                   |
 | `WHATSAPP_VERIFY_TOKEN`         | The token Meta sends when it verifies the webhook.                                                                               | Empty                                   |
 | `WHATSAPP_ALLOWED_NUMBER`       | Your personal number, with country code, 7 to 15 digits. Required for `bot` and Cloud API. Self-chat uses the linked number.     | Empty                                   |
-| `NOSTR_ENABLED`                 | `true` enables the Nostr relay channel. The channel is configured only through these variables.                                  | Unset; disabled                         |
+| `NOSTR_ENABLED`                 | `true` enables the Nostr relay channel; `false` disables it.                                                                     | Unset; disabled                         |
 | `NOSTR_RELAY_URL`               | The relay address (`https://`, `http://`, `wss://` or `ws://`). Nod keeps one authenticated WebSocket subscription open.         | Empty                                   |
 | `NOSTR_PRIVATE_KEY`             | The channel's private key: 64 hex characters. Nod signs every event with it. Never commit or share it.                           | Empty                                   |
 | `NOSTR_CHANNELS`                | Comma-separated relay channel IDs Nod listens in (the `h` tag of group messages).                                                | Empty                                   |
@@ -176,7 +176,7 @@ To switch to polling, remove the webhook with Telegram's [deleteWebhook method](
 
 ### Nostr relay
 
-Only `NOSTR_ENABLED=true` enables the channel. The other variables alone leave it disabled.
+Only `NOSTR_ENABLED=true` enables the channel. The other variables alone leave it disabled. The **Buzz** tile in **Channels** connects a relay the usual way; these variables stay the server-managed way and take precedence over the saved setup.
 
 Nod connects to `NOSTR_RELAY_URL` and subscribes to chat events (kind 9) in the channels of `NOSTR_CHANNELS` that address the channel account (`p` tag). It signs its replies with `NOSTR_PRIVATE_KEY` (BIP340) and answers in the same channel. The relay challenges the connection with NIP-42 authentication, answered by a signed kind 22242 event. Events that fail signature checks, come from keys outside `NOSTR_ALLOWED_PUBKEYS`, or do not address the channel account are dropped. Each sender in a relay channel maps to one conversation thread (`<channel id>/<sender public key>`). Files stay in the app; the reply names them. On every connection Nod receives messages from the last 30 seconds; older messages sent while it was offline are not received.
 
