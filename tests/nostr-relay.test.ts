@@ -592,6 +592,86 @@ test('rejects the post when the only notice is not confirmed', async () => {
   await assert.rejects(alone, /Nostr relay delivery was not confirmed/);
 });
 
+test('suppressed notice failure keeps no replay entry for a later identical notice', async () => {
+  const { socket, transport, collect } = connectedTransport();
+  await transport.poll?.(collect);
+  socket.open();
+
+  const post = (text: string) =>
+    transport.post({
+      channelId: 'nostr',
+      accountId: botIdentity,
+      threadId: `room/${senderIdentity}`,
+      text,
+      attachments: [
+        {
+          name: 'report.pdf',
+          mimeType: 'application/pdf',
+          size: 3,
+          async read() {
+            return new Uint8Array([1, 2, 3]);
+          },
+        },
+      ],
+      attachmentFailure: async (names) => `Files stay in the app: ${names.join(', ')}`,
+    });
+
+  const first = post('body');
+  const textEvent = socket.frames('EVENT')[0][1] as NostrRelayEvent;
+  socket.message(['OK', textEvent.id, true, '']);
+  await sleep(0);
+  const suppressedNotice = socket.frames('EVENT')[1][1] as NostrRelayEvent;
+  socket.message(['OK', suppressedNotice.id, false, 'blocked']);
+  assert.deepEqual(await first, { id: textEvent.id, ids: [textEvent.id] });
+
+  const later = post('body');
+  const laterText = socket.frames('EVENT')[2][1] as NostrRelayEvent;
+  socket.message(['OK', laterText.id, true, '']);
+  await sleep(0);
+  const laterNotice = socket.frames('EVENT')[3][1] as NostrRelayEvent;
+  assert.notEqual(laterNotice.id, suppressedNotice.id);
+  socket.message(['OK', laterNotice.id, true, '']);
+  assert.deepEqual(await later, { id: laterText.id, ids: [laterText.id, laterNotice.id] });
+});
+
+test('keeps the event id when a failed notice is retried', async () => {
+  const { socket, transport, collect } = connectedTransport();
+  await transport.poll?.(collect);
+  socket.open();
+
+  const post = () =>
+    transport.post({
+      channelId: 'nostr',
+      accountId: botIdentity,
+      threadId: `room/${senderIdentity}`,
+      text: '',
+      attachments: [
+        {
+          name: 'report.pdf',
+          mimeType: 'application/pdf',
+          size: 3,
+          async read() {
+            return new Uint8Array([1, 2, 3]);
+          },
+        },
+      ],
+      attachmentFailure: async (names) => `Files stay in the app: ${names.join(', ')}`,
+    });
+
+  const failed = post();
+  await sleep(0);
+  const attempt = socket.frames('EVENT')[0][1] as NostrRelayEvent;
+  socket.message(['OK', attempt.id, false, 'blocked']);
+  await assert.rejects(failed, /Nostr relay delivery was not confirmed/);
+
+  const retry = post();
+  await sleep(0);
+  const replay = socket.frames('EVENT')[1][1] as NostrRelayEvent;
+  assert.equal(replay.id, attempt.id);
+  socket.message(['OK', replay.id, true, '']);
+  assert.deepEqual(await retry, { id: attempt.id, ids: [attempt.id] });
+});
+
 test('backs off further while the relay keeps refusing the connection', async () => {
   const sockets: FakeSocket[] = [];
   const transport = createNostrRelayTransport(environment(), {

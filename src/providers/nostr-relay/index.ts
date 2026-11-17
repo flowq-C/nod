@@ -315,6 +315,7 @@ export function createNostrRelayTransport(
     peer: string,
     replyToMessageId: string | undefined,
     text: string,
+    willRetry = true,
   ) {
     const key = JSON.stringify([relayChannel, peer, replyToMessageId ?? '', text]);
     const replay = failedSends.get(key);
@@ -337,8 +338,10 @@ export function createNostrRelayTransport(
     try {
       return await confirm(current, event, 'EVENT');
     } catch (error) {
-      failedSends.set(key, event);
-      while (failedSends.size > 100) failedSends.delete(failedSends.keys().next().value!);
+      if (willRetry) {
+        failedSends.set(key, event);
+        while (failedSends.size > 100) failedSends.delete(failedSends.keys().next().value!);
+      }
       throw error;
     }
   }
@@ -435,10 +438,13 @@ export function createNostrRelayTransport(
           .attachmentFailure?.(attachments.map((file) => file.name))
           .catch(() => undefined);
         if (notice?.trim()) {
+          const willRetry = !ids.length;
           try {
-            ids.push(await send(current, relayChannel, peer, input.replyToMessageId, notice));
+            ids.push(
+              await send(current, relayChannel, peer, input.replyToMessageId, notice, willRetry),
+            );
           } catch (error) {
-            if (!ids.length) throw error;
+            if (willRetry) throw error;
           }
         }
       }
