@@ -998,6 +998,30 @@ test('a refused or failed relay setup keeps its reason and never shows the priva
   });
 });
 
+test('an unusable setup value names the field to correct and never an environment name', async () => {
+  const { verifier } = setupVerifier();
+  await assert.rejects(
+    verifier.verify('nostr', { ...setupInput, relayUrl: 'ftp://relay.example' }),
+    (error: Error) => {
+      assert.ok(error instanceof ChannelSetupFailure);
+      assert.equal(error.reason, 'invalid_input');
+      assert.match(error.details ?? '', /relay address/);
+      assert.equal(error.details?.includes('NOSTR_'), false);
+      return true;
+    },
+  );
+  await assert.rejects(
+    verifier.verify('nostr', { ...setupInput, privateKey: 'not-a-key' }),
+    (error: Error) => {
+      assert.ok(error instanceof ChannelSetupFailure);
+      assert.equal(error.reason, 'invalid_input');
+      assert.match(error.details ?? '', /private key/);
+      assert.equal(error.details?.includes('NOSTR_'), false);
+      return true;
+    },
+  );
+});
+
 test('the relay setup validates its input before it opens a connection', async () => {
   const { sockets, verifier } = setupVerifier();
   for (const input of [

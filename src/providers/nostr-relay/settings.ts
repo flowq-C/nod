@@ -7,6 +7,13 @@ const chatKind = 9;
 const setupSubscription = 'nod-nostr-setup';
 const setupTimeoutMs = 15_000;
 
+const inputFields: Record<string, string> = {
+  NOSTR_RELAY_URL: 'Enter the relay address as an https, http, wss or ws URL.',
+  NOSTR_PRIVATE_KEY: 'Enter the private key as 64 hex characters.',
+  NOSTR_CHANNELS: 'Enter the channel IDs as text, such as room.',
+  NOSTR_ALLOWED_PUBKEYS: 'Enter the allowed pubkeys as 64 hex characters or leave the field empty.',
+};
+
 const inputSchema = z
   .object({
     relayUrl: z.string().trim().min(1).max(200),
@@ -147,11 +154,13 @@ export function createNostrRelaySetupVerifier(
       const relayUrl = config.relayUrl;
       const secretKey = config.secretKey;
       const accountId = config.accountId;
-      if (missing.length || !relayUrl || !secretKey || !accountId)
+      if (missing.length || !relayUrl || !secretKey || !accountId) {
+        const wrong = [...new Set(missing.length ? missing : ['NOSTR_PRIVATE_KEY'])];
         throw new ChannelSetupFailure(
           'invalid_input',
-          `The Nostr relay setup is missing ${missing.join(', ') || 'NOSTR_PRIVATE_KEY'}.`,
+          wrong.map((name) => inputFields[name]).join(' '),
         );
+      }
       await probe(
         { relayUrl, secretKey, accountId, relayChannels: config.relayChannels },
         options.createSocket,

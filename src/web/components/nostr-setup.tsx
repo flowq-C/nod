@@ -196,7 +196,7 @@ export function NostrSetup({
                   )}
                   {active && index === 3 && (
                     <form className="nostr-setup-content" onSubmit={onVerify}>
-                      <p>Nod answers in this channel.</p>
+                      <p>Nod answers in the channels you chose.</p>
                       <div className="nostr-setup-actions">
                         <Button type="submit" size="sm" disabled={disabled || !complete}>
                           {busy ? 'Connecting…' : 'Connect Buzz'}
