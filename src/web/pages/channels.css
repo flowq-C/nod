@@ -268,7 +268,8 @@
   line-height: 1.6;
 }
 
-.channel-wizard > .telegram-setup {
+.channel-wizard > .telegram-setup,
+.channel-wizard > .nostr-setup {
   margin: 24px 0;
 }
 
