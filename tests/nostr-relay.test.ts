@@ -984,6 +984,18 @@ test('a refused or failed relay setup keeps its reason and never shows the priva
     assert.match(error.details ?? '', /closed the connection/);
     return true;
   });
+
+  const unopenable = createNostrRelaySetupVerifier({
+    createSocket: () => {
+      throw new Error('socket refused');
+    },
+  });
+  await assert.rejects(unopenable.verify('nostr', setupInput), (error: Error) => {
+    assert.ok(error instanceof ChannelSetupFailure);
+    assert.equal(error.reason, 'verification_failed');
+    assert.match(error.details ?? '', /connection failed/);
+    return true;
+  });
 });
 
 test('the relay setup validates its input before it opens a connection', async () => {

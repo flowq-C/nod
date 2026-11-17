@@ -38,10 +38,18 @@ function probe(
   createSocket: ((url: string) => RelaySocket) | undefined,
   secrets: string[],
 ) {
+  let socket: RelaySocket;
+  try {
+    socket = (createSocket ?? ((url: string) => new WebSocket(url)))(config.relayUrl);
+  } catch {
+    throw new ChannelSetupFailure(
+      'verification_failed',
+      'The relay connection failed. Check the relay address.',
+    );
+  }
   return new Promise<void>((resolve, reject) => {
     let settled = false;
     let pendingAuthentication: string | undefined;
-    let socket: RelaySocket;
     const finish = (failure?: string) => {
       if (settled) return;
       settled = true;
@@ -56,11 +64,6 @@ function probe(
       setupTimeoutMs,
     );
     timer.unref?.();
-    try {
-      socket = (createSocket ?? ((url: string) => new WebSocket(url)))(config.relayUrl);
-    } catch {
-      return finish('The relay connection failed. Check the relay address.');
-    }
     const send = (frame: unknown[]) => socket.send(JSON.stringify(frame));
     const subscribe = () =>
       send([
