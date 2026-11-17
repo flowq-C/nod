@@ -51,7 +51,7 @@ const count = z.number().int().min(0).max(1_000_000);
 const age = z.number().int().min(0).max(31_536_000_000);
 const hash = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
 const fail = (message: string, statusCode: number) =>
-  Object.assign(new Error(message), { statusCode });
+  Object.assign(new Error(message), { statusCode, notRun: true });
 
 function attachmentFile(file: z.infer<typeof submission>['attachments'][number]): FeedbackFile {
   const bytes = Buffer.from(file.data, 'base64');
@@ -322,43 +322,52 @@ export async function registerFeedback(
     ).rows[0];
     return row && !rejectionClaim(row) ? receipt(row) : null;
   };
-  const sendDraft = async (id: string, report: { reportId: string | null } | { build: true }) => {
+  const sendDraft = async (
+    id: string,
+    reportId: string | null,
+    abandoned: () => boolean = () => false,
+  ) => {
     const draft = await draftRow(id);
     if (!draft) throw fail('This bug report is no longer available.', 404);
     const sent = await sentReceipt(id);
     if (sent) return sent;
-    let reportId = 'reportId' in report ? report.reportId : null;
-    if ('build' in report) {
-      sweep();
-      const content = await options.buildReport([], [], false);
-      if (Buffer.byteLength(content) > feedbackLimits.reportBytes)
-        throw fail('The diagnostic report is too large.', 413);
-      reportId = randomUUID();
-      if (reports.size >= 5) reports.delete(reports.keys().next().value!);
-      reports.set(reportId, {
-        id: reportId,
-        content,
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-      });
-    }
-    return deliver({
-      submissionId: id,
-      category: 'bug',
-      feedback: draft.summary,
-      ...technical,
-      reportId,
-      attachments: [],
-    });
+    return deliver(
+      {
+        submissionId: id,
+        category: 'bug',
+        feedback: draft.summary,
+        ...technical,
+        reportId,
+        attachments: [],
+      },
+      abandoned,
+    );
   };
-  const latestDraft = async (threadId: string) =>
-    (
+  const draftFor = async (threadId: string, sourceMessageId?: string | null) => {
+    const replied = sourceMessageId
+      ? (
+          await options.pool.query<{ id: string }>(
+            `SELECT r.presentation->>'draftId' AS id FROM messages m
+             JOIN messages r ON r.id=m.reply_to_message_id AND r.owner_id=m.owner_id
+             WHERE m.owner_id=$1 AND m.id=$2 AND r.presentation->>'type'='bug-report'`,
+            [options.ownerId, sourceMessageId],
+          )
+        ).rows[0]?.id
+      : undefined;
+    const draft = (
       await options.pool.query<{ id: string; summary: string }>(
-        `SELECT d.id,d.summary FROM feedback_drafts d
-         WHERE d.owner_id=$1 AND d.thread_id=$2 AND d.created_at > now() - interval '1 day'
-         ORDER BY d.created_at DESC LIMIT 1`,
-        [options.ownerId, threadId],
+        replied
+          ? `SELECT id,summary FROM feedback_drafts WHERE owner_id=$1 AND thread_id=$2 AND id=$3`
+          : `SELECT d.id,d.summary FROM feedback_drafts d
+             WHERE d.owner_id=$1 AND d.thread_id=$2 AND d.created_at > now() - interval '1 day'
+               AND NOT EXISTS (SELECT 1 FROM feedback_submissions s WHERE s.owner_id=$1 AND s.id=d.id
+                 AND NOT (s.status='rejected' AND s.request_hash='' AND s.payload_hash=''))
+             ORDER BY d.created_at DESC LIMIT 1`,
+        replied ? [options.ownerId, threadId, replied] : [options.ownerId, threadId],
       )
     ).rows[0];
+    return draft && { ...draft, sent: await sentReceipt(draft.id) };
+  };
   app.post('/api/feedback', { bodyLimit: feedbackLimits.requestBytes }, async (request, reply) => {
     const startedAt = Date.now();
     reply.header('Cache-Control', 'no-store');
@@ -387,7 +396,7 @@ export async function registerFeedback(
       .object({ reportId: uuid.nullable() })
       .strict()
       .parse(request.body ?? {});
-    return sendDraft(id, { reportId: input.reportId });
+    return sendDraft(id, input.reportId);
   });
   app.get<{ Params: { id: string } }>('/api/feedback/:id', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
@@ -448,5 +457,5 @@ export async function registerFeedback(
       pending.delete(id);
     }
   });
-  return { sendDraft, latestDraft };
+  return { sendDraft, draftFor, configured: options.delivery.configured };
 }

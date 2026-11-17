@@ -263,9 +263,9 @@ After first-time setup, a short invitation points to **Report bug**. Dismiss it 
 
 When something in Nod itself fails, or you tell Nod that something in Nod isn't working, Nod drafts a bug report once with a short summary of what happened. In the app, the draft appears in chat as a card with the summary, **Include diagnostic report**, **Review** and **Send report**. One click on **Send report** sends it to the same recipient as the dialog. Nod skips this for errors from outside services, such as a missing connection, credits, an app outage or a website's own error, and in background checks.
 
-A request that stops on an unexpected error outside the model connection ends with the same card, filled in with the error. A model connection failure links to **Settings > Models** instead.
+A request, task or schedule run that stops on an unexpected error outside the model connection ends with the same card, with a short fixed summary. The error itself goes in the diagnostic report, not the summary. A model connection failure links to **Settings > Models** instead.
 
-In Telegram and WhatsApp, the draft arrives as text. Reply "send" to share it with the diagnostic report, or "send without diagnostics" to share only the text. Nod sends it only when your reply clearly asks for that, and otherwise asks you to confirm first. Nothing is sent until you click **Send report** or reply to send it.
+In Telegram and WhatsApp, the draft arrives as text. Reply "send" to share the summary, without a diagnostic report, since you can't review one there. To add the report, send the same draft from its card in Nod on your computer. Nod sends it only when your reply clearly asks for that, and otherwise asks you to confirm first. Nothing is sent until you click **Send report** or reply to send it.
 
 **Include diagnostic report** starts selected for every feedback category until you change it. It adds recent messages, tool inputs and results, errors, and app activity to help fix problems and improve Nod. Known secrets and recognized personal details are masked, but redaction can miss information.
 

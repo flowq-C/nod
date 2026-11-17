@@ -1492,7 +1492,8 @@ async function initializeApplication(
           : action === 'NOD_bug_report_send'
             ? feedbackDrafts.sendDraft(
                 String(args.draftId),
-                args.includeReport === true ? { build: true } : { reportId: null },
+                null,
+                () => provenance.signal?.aborted === true,
               )
             : action === 'NOD_limits_update'
               ? withTurnLock(turnLock, (client) => ledger.setLimits(args, 'agent', client))
@@ -2368,23 +2369,26 @@ async function initializeApplication(
           const { id, state, snoozedUntil, feedback } = await proactivity.control(args, turn);
           return { id, state, snoozedUntil, feedback };
         }
+        if (action === 'bug_report_draft' || action === 'bug_report_send') {
+          if (!feedbackDrafts.configured)
+            return 'Bug reports cannot be sent from this Nod. Describe the problem in your reply instead.';
+        }
         if (action === 'bug_report_draft') {
           const { summary } = z.object({ summary: z.string().trim().min(1).max(4000) }).parse(args);
-          await transaction(async (client) => {
-            if ((await lockThread(client)).id !== turn.threadId)
-              throw new Error('The conversation is no longer active.');
-            await insertBugReportDraft(client, turn, '', summary);
-          }, pool);
+          await withTurnLock(turn.turnId, (client) =>
+            insertBugReportDraft(client, turn, '', summary),
+          );
+          refresh();
           return 'The owner now sees this bug report with a Send report button, or can reply "send" in a chat app. Do not repeat the summary.';
         }
         if (action === 'bug_report_send') {
-          const { includeReport } = z.object({ includeReport: z.boolean() }).parse(args);
-          const draft = await feedbackDrafts.latestDraft(turn.threadId);
+          const draft = await feedbackDrafts.draftFor(turn.threadId, provenance.sourceMessageId);
           if (!draft)
             throw new Error(
-              'No bug report is waiting in this conversation. Draft one with bug_report_draft first.',
+              'No unsent bug report is waiting in this conversation. Draft one with bug_report_draft first.',
             );
-          const input = { draftId: draft.id, summary: draft.summary, includeReport };
+          if (draft.sent) return { status: 'already_sent', receipt: draft.sent };
+          const input = { draftId: draft.id, summary: draft.summary };
           const verdict = await trust.check(turn, 'NOD_bug_report_send', input);
           return approvals.request(turn, 'NOD_bug_report_send', input, {
             ...provenance,

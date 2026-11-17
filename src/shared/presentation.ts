@@ -140,7 +140,7 @@ const bugReportPresentation = z.strictObject({
 });
 
 export const bugReportReplyHint =
-  'Reply "send" to share it with a diagnostic report of recent activity (personal details masked), "send without diagnostics" to share only this text, or ignore it.';
+  'Reply "send" to share this summary with the Nod team, or ignore it. To add a diagnostic report, send it from Nod on your computer.';
 
 export const presentationSchema = z
   .discriminatedUnion('type', [

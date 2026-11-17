@@ -3219,7 +3219,7 @@ test(
         ).rows[0];
         assert.equal(draft.owner_id, ownerId);
         assert.equal(draft.summary, card.summary);
-        assert.match(draft.summary, /Synthetic runtime failure\./);
+        assert.doesNotMatch(draft.summary, /Synthetic runtime failure/);
       });
 
       await t.test('a reached spending limit pauses all but owner messages', async (t) => {

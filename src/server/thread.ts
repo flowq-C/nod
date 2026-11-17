@@ -1317,7 +1317,7 @@ async function failTurn(
         client,
         ref,
         message.trim(),
-        `Nod stopped on an unexpected error${work ? ` while working on “${work}”` : ''}: ${error}`,
+        'Nod stopped on an unexpected error while working on a request.',
         streamId,
       );
     else await insertAssistantMessage(client, ref, message.trim(), [], streamId);

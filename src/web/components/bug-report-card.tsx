@@ -12,6 +12,7 @@ import { AlertCircle, Bug, Check, Send } from './icons';
 import { Button } from './ui';
 
 type Draft = {
+  summary: string;
   enabled: boolean;
   recipient: string | null;
   receipt: FeedbackReceipt | null;
@@ -137,6 +138,23 @@ export function BugReportCard({
               Delivery not confirmed yet
             </p>
             {sent.message && <p>{sent.message}</p>}
+            <button
+              type="button"
+              className="feedback-text-action"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  applyReceipt(await api<FeedbackReceipt>(`/api/feedback/${draftId}`));
+                } catch (cause) {
+                  setError(errorMessage(cause));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Check again
+            </button>
           </div>
         ) : sent ? (
           <div className="action-card-footer">
@@ -177,7 +195,7 @@ export function BugReportCard({
         )
       }
     >
-      <p className="bug-report-card-summary">{summary}</p>
+      <p className="bug-report-card-summary">{draft?.summary ?? summary}</p>
       {!sent && (
         <FeedbackDiagnostics
           included={included}
