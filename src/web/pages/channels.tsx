@@ -10,7 +10,6 @@ import {
   Settings,
   Unlink,
   UserRound,
-  Workflow,
 } from '../components/icons';
 import { IntegrationCard } from '../components/integration-card';
 import { NostrSetup } from '../components/nostr-setup';
@@ -73,10 +72,13 @@ function ExternalLinkText({ href, children }: { href: string; children: React.Re
 }
 
 function ChannelLogo({ id, size }: { id: ChannelProvider; size: number }) {
-  return id === 'nostr' ? (
-    <Workflow size={size} aria-hidden="true" />
-  ) : (
-    <img src={`/logos/${id}.svg`} alt="" width={size} height={size} />
+  return (
+    <img
+      src={id === 'nostr' ? '/logos/nostr.png' : `/logos/${id}.svg`}
+      alt=""
+      width={size}
+      height={size}
+    />
   );
 }
 
