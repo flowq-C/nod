@@ -74,7 +74,7 @@ function ExternalLinkText({ href, children }: { href: string; children: React.Re
 function ChannelLogo({ id, size }: { id: ChannelProvider; size: number }) {
   return (
     <img
-      src={id === 'nostr' ? '/logos/nostr.png' : `/logos/${id}.svg`}
+      src={id === 'nostr' ? '/logos/buzz.png' : `/logos/${id}.svg`}
       alt=""
       width={size}
       height={size}
