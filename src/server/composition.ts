@@ -71,6 +71,7 @@ import type { UsageTelemetry } from '../ports/provider-usage.ts';
 import { agentModels, defaultEffort, defaultModel } from '../shared/model-defaults.ts';
 import { createChatSdkTransport } from '../providers/chat-sdk/index.ts';
 import { createWhatsAppLinkedTransport } from '../providers/chat-sdk/whatsapp.ts';
+import { createNostrRelayTransport } from '../providers/nostr-relay/index.ts';
 import { combineMessagingTransports } from '../providers/chat-sdk/combined.ts';
 import { createChatSdkSetupVerifier } from '../providers/chat-sdk/settings.ts';
 import { createContainerBrowserComputer } from '../providers/container-browser/index.ts';
@@ -637,7 +638,10 @@ export function createDefaultAdapters(
           (mode !== 'bot' && mode !== 'self-chat') ||
           (mode === 'bot' && !/^\d{7,15}$/.test(configured.WHATSAPP_ALLOWED_NUMBER ?? ''))
         )
-          return createChatSdkTransport(pool, configured);
+          return combineMessagingTransports(
+            createChatSdkTransport(pool, configured),
+            createNostrRelayTransport(configured),
+          );
         return combineMessagingTransports(
           createChatSdkTransport(pool, { ...configured, WHATSAPP_ENABLED: 'false' }),
           createWhatsAppLinkedTransport({
@@ -647,6 +651,7 @@ export function createDefaultAdapters(
             onDrop: (drop) =>
               logFailure('channel_message_dropped', null, { provider: 'whatsapp', ...drop }),
           }),
+          createNostrRelayTransport(configured),
         );
       },
     },
