@@ -2857,7 +2857,6 @@ async function initializeApplication(
     analytics,
     model: () => adapters.model,
     accounts: localAccounts,
-    origin: publicOrigin,
     localUser: { id: ownerId, name: 'You', email: null, avatarUrl: null },
     developerIds: desktopMode ? new Set() : new Set([ownerId]),
     start: welcome,

@@ -417,7 +417,6 @@ test(
     vault.registerRoutes(app);
     createAccountSession({
       accounts,
-      origin: `http://localhost:${port}`,
       localUser: { id: ownerId, name: 'You', email: null, avatarUrl: null },
       start: () => onboarding.complete(),
     }).register(app);
