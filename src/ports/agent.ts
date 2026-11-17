@@ -362,7 +362,7 @@ export interface AgentSessionOptions extends ExecutionScope {
   automatic?: boolean;
   restricted?: boolean;
   ephemeral?: boolean;
-  restartable?: boolean;
+  newRequest?: boolean;
   scheduleCache?: 'short' | 'long';
   keepWarm?(): Promise<boolean>;
   systemPrompt: string;

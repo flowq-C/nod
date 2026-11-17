@@ -5002,6 +5002,61 @@ test('a loaded schema that exceeds the request budget returns to deferred tools'
   assert.ok(sources.some((source) => source.includes(description)));
 });
 
+test('a tool loaded in one turn stays declared in the next turn of the session', async (t) => {
+  const { bodies, url, close } = await contextRecoveryServer(0, 1, -1, false, undefined, [
+    { name: 'nod_tool_search', args: { query: 'synthetic_lookup', limit: 1 } },
+    { name: 'synthetic_lookup', args: {} },
+  ]);
+  t.after(close);
+  const access = smallContextAccess('compatible', 'fixture-context', 131_072);
+  access.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+  access.definition.spec = { ...access.definition.spec, baseUrl: url };
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-loaded-tools-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { workspace } = await hostSandbox(t);
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: directory,
+    resolve: async () => access,
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  let lookups = 0;
+  const declared = (body: (typeof bodies)[number]) =>
+    (body.tools ?? []).map((tool) => (tool as { function: { name: string } }).function.name);
+  const events: AgentEvent[] = [];
+  for (const text of ['Look up the synthetic record.', 'Look it up again.']) {
+    const session = await agent.open({
+      ...fakeExecution(threadId),
+      restricted: true,
+      systemPrompt: 'Use synthetic tools.',
+      workspace,
+      runTool: async (_name, _params, run) => run(),
+      tools: [
+        {
+          name: 'synthetic_lookup',
+          description: 'Look up the synthetic record.',
+          deferred: { namespace: 'synthetic', description: 'Synthetic tools.' },
+          parameters: Type.Object({}),
+          execute: async () => {
+            lookups++;
+            return { content: [{ type: 'text', text: 'Synthetic record.' }] };
+          },
+        },
+      ],
+      shouldStop: () => false,
+      onEvent: (event) => events.push(event),
+    });
+    await session.prompt(text, []);
+    await session.dispose();
+  }
+  assert.ok(!events.some((event) => event.type === 'error'));
+  assert.equal(lookups, 1);
+  assert.equal(bodies.length, 4);
+  assert.ok(!declared(bodies[0]!).includes('synthetic_lookup'));
+  assert.ok(declared(bodies[3]!).includes('synthetic_lookup'));
+});
+
 test('a failed request cannot remain inside a compaction checkpoint', async (t) => {
   for (const prior of [false, true])
     await t.test(prior ? 'with a valid checkpoint' : 'without a checkpoint', async (t) => {
@@ -8327,7 +8382,7 @@ test('each session opens on its work model and the observer starts fresh after a
       sessionId: observer,
       ...(model ? { model } : {}),
       restricted: true,
-      restartable: true,
+      newRequest: true,
       systemPrompt: 'Fixture system',
       ...sandbox,
       tools: [],
@@ -8349,6 +8404,112 @@ test('each session opens on its work model and the observer starts fresh after a
   assert.ok(requests[1]!.history.includes('Synthetic first batch'));
   assert.ok(!requests[2]!.history.includes('Synthetic second batch'));
   assert.ok(requests[3]!.history.includes('Synthetic third batch'));
+});
+
+test('a new request after the cache went cold leaves large earlier tool results out of the model context', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-earlier-results-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const requests: string[][] = [];
+  const script: string[] = [];
+  let answeredAgo = 0;
+  const agent = createPiAgent({
+    provider: 'openai',
+    apiKey: 'fixture-key',
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.setActiveToolsByName(result.session.getAllTools().map((tool) => tool.name));
+      result.session.agent.streamFunction = (model, context) => {
+        requests.push(context.messages.map((message) => JSON.stringify(message)));
+        const step = script.shift() ?? 'answer';
+        const message: AssistantMessage = {
+          ...fauxAssistantMessage(
+            step === 'answer'
+              ? [{ type: 'text', text: `Conclusion ${requests.length}.` }]
+              : [{ type: 'toolCall', id: randomUUID(), name: step, arguments: {} }],
+          ),
+          provider: model.provider,
+          model: model.id,
+          api: model.api,
+          stopReason: step === 'answer' ? 'stop' : 'toolUse',
+          timestamp: Date.now() - answeredAgo,
+        };
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: message.stopReason as 'stop', message });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  let reads = 0;
+  const turn = async (prompt: string, steps: string[], newRequest = true) => {
+    script.push(...steps);
+    const session = await agent.open({
+      ...fakeExecution(threadId, randomUUID()),
+      newRequest,
+      systemPrompt: 'Fixture system',
+      ...sandbox,
+      tools: [
+        {
+          name: 'read_large',
+          description: 'Read a large synthetic source.',
+          parameters: { type: 'object', properties: {} },
+          eager: true,
+          execute: async () => ({
+            content: [{ type: 'text', text: `LARGE-RESULT-${++reads} ` + 'x'.repeat(5000) }],
+          }),
+        },
+        {
+          name: 'read_small',
+          description: 'Read a small synthetic source.',
+          parameters: { type: 'object', properties: {} },
+          eager: true,
+          execute: async () => ({ content: [{ type: 'text', text: 'SMALL-RESULT' }] }),
+        },
+      ],
+      shouldStop: () => false,
+      onEvent() {},
+    });
+    await session.prompt(prompt, []);
+    await session.dispose();
+    await setTimeout(2);
+  };
+  const text = (request: string[]) => request.join('\n');
+  answeredAgo = 6 * 60_000;
+  await turn('Synthetic research request', ['read_large', 'read_small', 'answer']);
+  answeredAgo = 0;
+  await turn('What did the first source say?', ['read_large', 'answer']);
+  await turn('Warm follow-up', ['answer']);
+  answeredAgo = 6 * 60_000;
+  await turn('Synthetic question asked', ['answer']);
+  await turn('Synthetic answer to the question', ['answer'], false);
+  openLocalSession(join(directory, threadId)).appendUsage(
+    'cache_warm',
+    'openai',
+    'gpt-6.1-sol',
+    fauxAssistantMessage('').usage,
+  );
+  await turn('Request while the cache was kept warm', ['answer']);
+  const followUp = text(requests[3]!);
+  assert.equal(followUp.includes('LARGE-RESULT-1'), false);
+  assert.match(
+    followUp,
+    /This read_large result \(5,015 characters\) came from an earlier request and is no longer in context\. If you need its details, read the source again\. Never repeat an action only to see its result\./,
+  );
+  assert.ok(followUp.includes('"name":"read_large"'));
+  assert.ok(followUp.includes('SMALL-RESULT'));
+  assert.ok(followUp.includes('Synthetic research request'));
+  assert.ok(followUp.includes('Conclusion 3.'));
+  assert.ok(followUp.includes('What did the first source say?'));
+  assert.ok(text(requests[4]!).includes('LARGE-RESULT-2'));
+  assert.deepEqual(requests[4]!.slice(0, requests[3]!.length), requests[3]);
+  for (const later of [5, 7, 8]) {
+    assert.ok(text(requests[later]!).includes('LARGE-RESULT-2'));
+    assert.deepEqual(requests[later]!.slice(0, requests[later - 1]!.length), requests[later - 1]);
+  }
+  assert.ok((await localText(join(directory, threadId))).includes('LARGE-RESULT-1'));
 });
 
 test('a failed model request leaves none of its unanswered input for later turns', async (t) => {
