@@ -108,7 +108,6 @@ function configuration(environment: Environment) {
   let secretKey = rawKey && identityPattern.test(rawKey) ? rawKey : undefined;
   let accountId: string | undefined;
   if (enabled && secretKey) {
-    // Derive only for an enabled channel; an unusable scalar is missing setup.
     try {
       accountId = bytesToHex(schnorr.getPublicKey(hexToBytes(secretKey)));
     } catch {
@@ -168,6 +167,7 @@ export function createNostrRelayTransport(
   let socket: RelaySocket | undefined;
   let authenticating = false;
   let attempt = 0;
+  let cutoffMs = 0;
   let reconnect: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
 
@@ -180,7 +180,8 @@ export function createNostrRelayTransport(
     const sender = event.pubkey.toLowerCase();
     if (sender === accountId) return dropped('own_echo');
     const sentAt = event.created_at * 1000;
-    if (!Number.isFinite(sentAt) || sentAt > Date.now() + 300_000) return dropped('invalid_time');
+    if (!Number.isFinite(sentAt) || sentAt > Date.now() + 300_000 || sentAt < cutoffMs)
+      return dropped('invalid_time');
     const relayChannel = event.tags.find((tag) => tag[0] === 'h')?.[1];
     if (!relayChannel || !config.relayChannels.includes(relayChannel))
       return dropped('unsupported_channel');
@@ -208,6 +209,8 @@ export function createNostrRelayTransport(
   }
 
   function subscribe(current: RelaySocket) {
+    const since = Math.floor(Date.now() / 1000) - lookbackSeconds;
+    cutoffMs = since * 1000;
     sendFrame(current, [
       'REQ',
       subscriptionId,
@@ -215,7 +218,7 @@ export function createNostrRelayTransport(
         kinds: [chatKind],
         '#h': config.relayChannels,
         '#p': [accountId],
-        since: Math.floor(Date.now() / 1000) - lookbackSeconds,
+        since,
       },
     ]);
   }
@@ -234,8 +237,7 @@ export function createNostrRelayTransport(
     });
     confirm(current, event, 'AUTH', () => {
       authenticating = false;
-      // Always re-subscribe: the relay can close the pre-auth REQ after this answer.
-      // A subscription sent before the authentication is no proof of a live one.
+      attempt = 0;
       subscribe(current);
     }).catch(() => {
       authenticating = false;
@@ -255,6 +257,10 @@ export function createNostrRelayTransport(
     const [type] = message;
     if (type === 'EVENT') return intake(message[2]);
     if (type === 'AUTH') return authenticate(current, message[1]);
+    if (type === 'EOSE') {
+      if (message[1] === subscriptionId) attempt = 0;
+      return;
+    }
     if (type === 'OK') {
       const id = typeof message[1] === 'string' ? message[1] : '';
       const registered = pending.get(id);
@@ -268,9 +274,6 @@ export function createNostrRelayTransport(
     }
     if (type === 'CLOSED') {
       if (message[1] !== subscriptionId) return;
-      // CLOSED leaves the connection up but silent, and receiving stops without error.
-      // Rebuild the connection and the subscription instead.
-      // Exception: an in-flight authentication answer re-subscribes on this connection.
       if (!authenticating)
         disconnect(current, 'The Nostr relay closed the subscription. Nod is trying to reconnect.');
     }
@@ -283,8 +286,6 @@ export function createNostrRelayTransport(
     accepted?: () => void,
   ) {
     return new Promise<string>((resolve, reject) => {
-      // Two identical posts in the same second share one event id.
-      // Each call registers its own confirmation for that id.
       const registered = pending.get(event.id) ?? new Set();
       const finish = (ok: boolean) => {
         clearTimeout(timer);
@@ -318,10 +319,6 @@ export function createNostrRelayTransport(
     const key = JSON.stringify([relayChannel, peer, replyToMessageId ?? '', text]);
     const replay = failedSends.get(key);
     failedSends.delete(key);
-    // Every logical send carries its own signed nonce tag.
-    // Two identical sends in one second therefore stay two separate events.
-    // A retry after a failed delivery republishes the same signed event.
-    // Relays then deduplicate on its id.
     const event =
       replay ??
       signEvent(config.secretKey!, {
@@ -349,9 +346,6 @@ export function createNostrRelayTransport(
   function disconnect(current: RelaySocket, message: string) {
     if (closed || socket !== current) return;
     socket = undefined;
-    // Retire the superseded socket for real.
-    // A late or synchronous close event re-enters here.
-    // The guard above ends that re-entry because the socket is already gone.
     openSockets.delete(current);
     current.close();
     authenticating = false;
@@ -374,7 +368,6 @@ export function createNostrRelayTransport(
     authenticating = false;
     current.addEventListener('open', () => {
       if (closed || socket !== current) return;
-      attempt = 0;
       channel.available = true;
       channel.error = undefined;
       subscribe(current);
@@ -441,8 +434,13 @@ export function createNostrRelayTransport(
         const notice = await input
           .attachmentFailure?.(attachments.map((file) => file.name))
           .catch(() => undefined);
-        if (notice?.trim())
-          ids.push(await send(current, relayChannel, peer, input.replyToMessageId, notice));
+        if (notice?.trim()) {
+          try {
+            ids.push(await send(current, relayChannel, peer, input.replyToMessageId, notice));
+          } catch (error) {
+            if (!ids.length) throw error;
+          }
+        }
       }
       if (!ids.length) throw new Error('Nostr relay delivery was not confirmed.');
       return { id: ids[0], ids };

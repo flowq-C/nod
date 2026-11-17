@@ -15,7 +15,6 @@ import {
   type SocketFrame,
 } from '../src/providers/nostr-relay/index.ts';
 
-// BIP340 test vector 0 (bitcoin/bips bip-0340/test-vectors.csv).
 const bipSecret = `${'0'.repeat(62)}03`;
 const bipPublic = 'f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9';
 const bipMessage = '00'.repeat(32);
@@ -263,11 +262,8 @@ test('answers NIP-42 authentication and restores the subscription', async () => 
   ]);
   assert.ok(verifyEvent(auth));
   socket.message(['OK', auth.id, true, '']);
-  // The relay can close the pre-auth REQ, so an accepted authentication re-subscribes.
   assert.equal(socket.frames('REQ').length, 2);
 
-  // A CLOSED during an in-flight authentication answer must not tear the connection down.
-  // The confirmation of that answer re-subscribes instead.
   socket.message(['AUTH', 'challenge-2']);
   const again = socket.frames('AUTH')[1][1] as NostrRelayEvent;
   assert.deepEqual(again.tags, [
@@ -325,11 +321,11 @@ test('keeps at most one relay connection open across repeated failures', async (
   sockets[1].message(['AUTH', 'challenge']);
   const auth = sockets[1].frames('AUTH')[0][1] as NostrRelayEvent;
   sockets[1].message(['OK', auth.id, false, 'denied']);
-  await sleep(1200);
+  await sleep(2200);
   await transport.poll?.(collect);
   sockets[2].open();
   sockets[2].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
-  await sleep(1200);
+  await sleep(4200);
   await transport.poll?.(collect);
   sockets[3].open();
 
@@ -536,6 +532,161 @@ test('does not connect while the channel is not configured', async () => {
     }),
     /The Nostr relay target is unavailable/,
   );
+});
+
+test('returns the delivered ids when the attachment notice is not confirmed', async () => {
+  const { socket, transport, collect } = connectedTransport();
+  await transport.poll?.(collect);
+  socket.open();
+
+  const posted = transport.post({
+    channelId: 'nostr',
+    accountId: botIdentity,
+    threadId: `room/${senderIdentity}`,
+    text: 'body',
+    attachments: [
+      {
+        name: 'report.pdf',
+        mimeType: 'application/pdf',
+        size: 3,
+        async read() {
+          return new Uint8Array([1, 2, 3]);
+        },
+      },
+    ],
+    attachmentFailure: async (names) => `Files stay in the app: ${names.join(', ')}`,
+  });
+  const textEvent = socket.frames('EVENT')[0][1] as NostrRelayEvent;
+  socket.message(['OK', textEvent.id, true, '']);
+  await sleep(0);
+  const noticeEvent = socket.frames('EVENT')[1][1] as NostrRelayEvent;
+  socket.message(['OK', noticeEvent.id, false, 'blocked']);
+  assert.deepEqual(await posted, { id: textEvent.id, ids: [textEvent.id] });
+});
+
+test('rejects the post when the only notice is not confirmed', async () => {
+  const { socket, transport, collect } = connectedTransport();
+  await transport.poll?.(collect);
+  socket.open();
+
+  const alone = transport.post({
+    channelId: 'nostr',
+    accountId: botIdentity,
+    threadId: `room/${senderIdentity}`,
+    text: '',
+    attachments: [
+      {
+        name: 'report.pdf',
+        mimeType: 'application/pdf',
+        size: 3,
+        async read() {
+          return new Uint8Array([1, 2, 3]);
+        },
+      },
+    ],
+    attachmentFailure: async (names) => `Files stay in the app: ${names.join(', ')}`,
+  });
+  await sleep(0);
+  const noticeEvent = socket.frames('EVENT')[0][1] as NostrRelayEvent;
+  socket.message(['OK', noticeEvent.id, false, 'blocked']);
+  await assert.rejects(alone, /Nostr relay delivery was not confirmed/);
+});
+
+test('backs off further while the relay keeps refusing the connection', async () => {
+  const sockets: FakeSocket[] = [];
+  const transport = createNostrRelayTransport(environment(), {
+    createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const collect = async (_message: InboundMessage) => {};
+  await transport.poll?.(collect);
+  sockets[0].open();
+  sockets[0].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  assert.equal(sockets.length, 2);
+  sockets[1].open();
+  sockets[1].message(['AUTH', 'challenge']);
+  const auth = sockets[1].frames('AUTH')[0][1] as NostrRelayEvent;
+  sockets[1].message(['OK', auth.id, false, 'denied']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  assert.equal(sockets.length, 2);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  assert.equal(sockets.length, 3);
+});
+
+test('resets the reconnect delay after the relay accepts authentication', async () => {
+  const sockets: FakeSocket[] = [];
+  const transport = createNostrRelayTransport(environment(), {
+    createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const collect = async (_message: InboundMessage) => {};
+  await transport.poll?.(collect);
+  sockets[0].open();
+  sockets[0].message(['CLOSED', 'nod-nostr-relay', 'auth-required: restricted']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  sockets[1].open();
+  sockets[1].message(['AUTH', 'challenge']);
+  const auth = sockets[1].frames('AUTH')[0][1] as NostrRelayEvent;
+  sockets[1].message(['OK', auth.id, true, '']);
+  sockets[1].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  assert.equal(sockets.length, 3);
+});
+
+test('resets the reconnect delay after the relay reports the subscription live', async () => {
+  const sockets: FakeSocket[] = [];
+  const transport = createNostrRelayTransport(environment(), {
+    createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const collect = async (_message: InboundMessage) => {};
+  await transport.poll?.(collect);
+  sockets[0].open();
+  sockets[0].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  sockets[1].open();
+  sockets[1].message(['EOSE', 'nod-nostr-relay']);
+  sockets[1].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
+  await sleep(1200);
+  await transport.poll?.(collect);
+  assert.equal(sockets.length, 3);
+});
+
+test('drops replayed events older than the subscription cutoff', async () => {
+  const { socket, transport, received, collect } = connectedTransport();
+  await transport.poll?.(collect);
+  socket.open();
+  socket.message([
+    'EVENT',
+    'sub',
+    signEvent(senderSecret, {
+      kind: 9,
+      created_at: Math.floor(Date.now() / 1000) - 60,
+      tags: [
+        ['h', 'room'],
+        ['p', botIdentity],
+      ],
+      content: 'stale replay',
+    }),
+  ]);
+  await transport.poll?.(collect);
+  assert.equal(received.length, 0);
 });
 
 test('channel creation survives an unusable private key and keeps the other channels', () => {
