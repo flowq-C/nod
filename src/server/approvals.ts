@@ -80,17 +80,17 @@ export type ChatConfirmationResult =
   | { waiting: { id: string; session_id: string; background: boolean } }
   | undefined;
 
-// A mirrored web question may be answered from the home room only once its mirror was sent before that answer arrived.
-const mirrorSentBefore = (messageId: string, sourceParam: string) =>
+// A mirrored web question may be answered from the home room only once its mirror was sent before that answer reached the DB (inbox created_at, DB clock, never the peer's).
+const mirrorSentBefore = (messageId: string, sourceParam: string, ownerParam: string) =>
   ` AND EXISTS (SELECT 1 FROM channel_outbox o WHERE o.message_id=${messageId} AND o.state='sent'
-      AND o.updated_at<(SELECT i.received_at FROM channel_inbox i WHERE i.source_id=${sourceParam} AND i.owner_id=$2))`;
+      AND o.updated_at<(SELECT i.created_at FROM channel_inbox i WHERE i.source_id=${sourceParam} AND i.owner_id=${ownerParam}))`;
 
 function chatConfirmationSql(match: string, mirrored = false) {
   return `SELECT a.*,u.source AS turn_source,u.status AS turn_status,u.background AS turn_background,u.session_id AS turn_session_id,u.prompt AS turn_prompt,to_jsonb(u)->>'task_id' AS turn_task_id
   FROM approvals a JOIN turns u ON u.id=a.turn_id
   WHERE ${match}
     AND a.owner_id=$2 AND u.owner_id=$2 AND a.thread_id=$3 AND u.thread_id=$3
-    AND (u.channel=$4 OR (u.channel='web' AND $6::boolean${mirrored ? mirrorSentBefore('a.confirmation_message_id', '$7') : ''}) OR a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
+    AND (u.channel=$4 OR (u.channel='web' AND $6::boolean${mirrored ? mirrorSentBefore('a.confirmation_message_id', '$7', '$2') : ''}) OR a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
       WHERE m.id=$5::uuid AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$5::uuid))
     AND EXISTS (SELECT 1 FROM messages c WHERE c.id=a.confirmation_message_id AND c.owner_id=a.owner_id AND c.hidden_at IS NULL)
     AND (to_jsonb(u)->>'task_id' IS NULL OR NOT EXISTS (
@@ -581,7 +581,7 @@ export async function createApprovals(
       input.replyToMessageId ??
       (
         await pool.query(
-          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND (u.channel=$3 OR (u.channel='web' AND $5::boolean${input.mirrored === true ? mirrorSentBefore('m.id', '$6').replace('$2', '$1') : ''})) AND m.role='assistant' AND m.hidden_at IS NULL
+          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND (u.channel=$3 OR (u.channel='web' AND $5::boolean${input.mirrored === true ? mirrorSentBefore('m.id', '$6', '$1') : ''})) AND m.role='assistant' AND m.hidden_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',m.created_at))
            AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND n.thread_id=$2 AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
              AND (n.created_at,n.id)>(m.created_at,m.id)

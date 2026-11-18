@@ -2899,8 +2899,8 @@ test(
         )`);
         const inbox = async (sourceId: string, receivedAgo: string) =>
           db.pool.query(
-            `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,owner_id,channel)
-             VALUES($1,'nostr','home','peer','home-room','Yes',now()-$2::interval,$3,'nostr:fixture')`,
+            `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,created_at,owner_id,channel)
+             VALUES($1,'nostr','home','peer','home-room','Yes',now()+interval '1 day',now()-$2::interval,$3,'nostr:fixture')`,
             [sourceId, receivedAgo, ownerId],
           );
         let seed = 0;
