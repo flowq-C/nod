@@ -58,7 +58,6 @@ interface ChannelOptions {
   admission?: WorkAdmission;
   ownerId: string;
   transport: MessagingTransport;
-  // Mirrors web turns into one home conversation of this provider (first allowed sender).
   mirror?: { provider: string; threadId: (senderId: string) => string };
   acceptVerification?: (
     text: string,
@@ -1150,9 +1149,6 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     await enqueueMirror();
   }
 
-  // Web turns have no inbox row. A 'mirror' inbox row is the delivery route for them: it is never
-  // pending or submitted, so it cannot start a turn, and only messages after its creation follow it.
-  // True only for the mirror peer (first allowed sender) writing in the configured home room.
   function homePeer(row: InboxRow) {
     const mirror = options.mirror;
     if (!mirror || row.provider !== mirror.provider) return false;
@@ -1489,7 +1485,6 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       );
     } catch (cause) {
       logFailure('channel_send_failed', cause);
-      // A rejection before anything reached the provider is a safe retry, not an unconfirmed send.
       const unconfirmed = postStarted && !(cause instanceof MessagingNotSentError);
       await pool.query(
         `UPDATE channel_outbox SET state=$3,reason=$4,claim_id=NULL,updated_at=now()

@@ -69,7 +69,6 @@ export interface ChatConfirmationInput {
   clientMessageId?: string;
   sourceId?: string;
   hasAttachments?: boolean;
-  // Set only for the mirror peer writing in the home room: its bare yes or no may answer a web question.
   mirrored?: boolean;
   answer?: { approvalId: string; approved?: boolean; mirrored?: boolean };
   clicked?: true;
@@ -80,7 +79,6 @@ export type ChatConfirmationResult =
   | { waiting: { id: string; session_id: string; background: boolean } }
   | undefined;
 
-// A mirrored web question may be answered from the home room only once its mirror was sent before that answer reached the DB (inbox created_at, DB clock, never the peer's).
 const mirrorSentBefore = (messageId: string, sourceParam: string, ownerParam: string) =>
   ` AND EXISTS (SELECT 1 FROM channel_outbox o WHERE o.message_id=${messageId} AND o.state='sent'
       AND o.updated_at<(SELECT i.created_at FROM channel_inbox i WHERE i.source_id=${sourceParam} AND i.owner_id=${ownerParam}))`;

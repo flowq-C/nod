@@ -3008,12 +3008,12 @@ test(
             sourceId: 'existing-answer',
             ...(mirroredPeer === undefined ? {} : { mirrored: mirroredPeer }),
           });
-          // Another room or another sender in a mirrored provider carries no home-peer flag.
           assert.equal(await mirrored.chat.answer(reply('nostr:fixture')), undefined);
           assert.equal(await mirrored.chat.answer(reply('nostr:fixture', false)), undefined);
+          assert.equal(await mirrored.chat.answer(reply('nostr:other-room')), undefined);
+          assert.equal(await mirrored.chat.answer(reply('nostr:other-room', false)), undefined);
           const answer = await mirrored.chat.answer(reply('nostr:fixture', true));
           assert.deepEqual(answer, { approvalId: pending.id, approved: true, mirrored: true });
-          // A forged answer without the flag cannot accept the web question.
           assert.equal(
             await transaction(
               (client) =>
