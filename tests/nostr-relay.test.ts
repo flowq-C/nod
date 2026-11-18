@@ -6,6 +6,7 @@ import { schnorr } from '@noble/curves/secp256k1.js';
 import Fastify from 'fastify';
 import pg from 'pg';
 import { ChannelSetupFailure } from '../src/ports/channel-settings.ts';
+import { MessagingNotSentError } from '../src/ports/messaging.ts';
 import type { InboundMessage, MessagingTransport } from '../src/ports/messaging.ts';
 import { combineMessagingTransports } from '../src/providers/chat-sdk/combined.ts';
 import {
@@ -526,7 +527,9 @@ test('posts kind 9 replies only after relay confirmation', async () => {
       threadId: 'room',
       text: 'wrong thread',
     }),
-    /The Nostr relay target is unavailable/,
+    (error: Error) =>
+      /The Nostr relay target is unavailable/.test(error.message) &&
+      !(error instanceof MessagingNotSentError),
   );
 
   const webhook = await transport.receive({
@@ -552,6 +555,21 @@ test('does not connect while the channel is not configured', async () => {
       text: 'offline',
     }),
     /The Nostr relay target is unavailable/,
+  );
+});
+
+test('a post while the socket is down is rejected as not sent', async () => {
+  const { socket, transport, collect } = connectedTransport();
+  await transport.poll?.(collect);
+  socket.close();
+  await assert.rejects(
+    transport.post({
+      channelId: 'nostr',
+      accountId: botIdentity,
+      threadId: `room/${senderIdentity}`,
+      text: 'while down',
+    }),
+    (error: Error) => error instanceof MessagingNotSentError,
   );
 });
 

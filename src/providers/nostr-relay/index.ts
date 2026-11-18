@@ -458,7 +458,7 @@ export function createNostrRelayTransport(
       !parsed ||
       !joinedChannels().includes(parsed.relayChannel)
     )
-      throw new MessagingNotSentError('The Nostr relay target is unavailable.');
+      throw new Error('The Nostr relay target is unavailable.');
   }
   function connected() {
     if (!socket || !channel.available)
