@@ -12,7 +12,13 @@ type Environment = Record<string, string | undefined>;
 
 const chatKind = 9;
 const authKind = 22242;
+const channelListKind = 39002;
+const memberAddedKind = 44100;
+const memberRemovedKind = 44101;
 const subscriptionId = 'nod-nostr-relay';
+const discoverySubscriptionId = 'nod-nostr-discovery';
+const signalSubscriptionId = 'nod-nostr-signals';
+const rediscoverIntervalMs = 720_000;
 const identityPattern = /^[0-9a-f]{64}$/;
 const signaturePattern = /^[0-9a-f]{128}$/;
 const relayChannelPattern = /^[A-Za-z0-9_-]{1,64}$/;
@@ -94,12 +100,9 @@ function replyTarget(event: NostrRelayEvent) {
 
 export function configuration(environment: Environment) {
   const env = { ...environment };
-  const missing = [
-    'NOSTR_RELAY_URL',
-    'NOSTR_PRIVATE_KEY',
-    'NOSTR_CHANNELS',
-    'NOSTR_ALLOWED_PUBKEYS',
-  ].filter((key) => !env[key]);
+  const missing = ['NOSTR_RELAY_URL', 'NOSTR_PRIVATE_KEY', 'NOSTR_ALLOWED_PUBKEYS'].filter(
+    (key) => !env[key],
+  );
   const relayUrl = socketUrl(env.NOSTR_RELAY_URL);
   if (env.NOSTR_RELAY_URL && !relayUrl) missing.push('NOSTR_RELAY_URL');
   const enabled = env.NOSTR_ENABLED === 'true';
@@ -169,12 +172,27 @@ export function createNostrRelayTransport(
   let attempt = 0;
   let cutoffMs = 0;
   let reconnect: ReturnType<typeof setTimeout> | undefined;
+  let rediscover: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
+  const autoChannels = new Set<string>();
+  const joinedChannels = () => [...new Set([...config.relayChannels, ...autoChannels])];
 
   function intake(raw: unknown) {
     const parsed = eventSchema.safeParse(raw);
     if (!parsed.success) return dropped('invalid_event');
     const event = parsed.data;
+    if (event.kind === channelListKind) {
+      if (!verifyEvent(event)) return;
+      for (const tag of event.tags) if (tag[0] === 'd') takeChannel(tag[1], true);
+      return;
+    }
+    if (event.kind === memberAddedKind || event.kind === memberRemovedKind) {
+      if (!verifyEvent(event)) return;
+      if (!event.tags.some((tag) => tag[0] === 'p' && (tag[1] ?? '').toLowerCase() === accountId))
+        return;
+      takeChannel(event.tags.find((tag) => tag[0] === 'h')?.[1], event.kind === memberAddedKind);
+      return;
+    }
     if (event.kind !== chatKind) return;
     if (!verifyEvent(event)) return dropped('invalid_signature');
     const sender = event.pubkey.toLowerCase();
@@ -183,10 +201,11 @@ export function createNostrRelayTransport(
     if (!Number.isFinite(sentAt) || sentAt > Date.now() + 300_000 || sentAt < cutoffMs)
       return dropped('invalid_time');
     const relayChannel = event.tags.find((tag) => tag[0] === 'h')?.[1];
-    if (!relayChannel || !config.relayChannels.includes(relayChannel))
+    if (!relayChannel || !joinedChannels().includes(relayChannel))
       return dropped('unsupported_channel');
-    if (!event.tags.some((tag) => tag[0] === 'p' && tag[1]?.toLowerCase() === accountId))
-      return dropped('not_addressed');
+    const peers = event.tags.filter((tag) => tag[0] === 'p' && identityPattern.test(tag[1] ?? ''));
+    if (peers.length && !peers.some((tag) => (tag[1] ?? '').toLowerCase() === accountId))
+      return dropped('addresses_other');
     if (!config.allowedSenderIds.includes(sender)) return dropped('sender_unmatched');
     const text = event.content.trim();
     if (!text) return dropped('unsupported_type');
@@ -216,11 +235,39 @@ export function createNostrRelayTransport(
       subscriptionId,
       {
         kinds: [chatKind],
-        '#h': config.relayChannels,
-        '#p': [accountId],
+        '#h': joinedChannels(),
         since,
       },
     ]);
+    sendFrame(current, [
+      'REQ',
+      discoverySubscriptionId,
+      { kinds: [channelListKind], '#p': [accountId] },
+    ]);
+    sendFrame(current, [
+      'REQ',
+      signalSubscriptionId,
+      { kinds: [memberAddedKind, memberRemovedKind], '#p': [accountId], since },
+    ]);
+  }
+
+  function takeChannel(channel: string | undefined, join: boolean) {
+    if (!channel || !relayChannelPattern.test(channel)) return;
+    const known = autoChannels.has(channel);
+    if (join === known) return;
+    if (join) autoChannels.add(channel);
+    else autoChannels.delete(channel);
+    if (socket) subscribe(socket);
+  }
+
+  function rescheduleRediscovery() {
+    clearTimeout(rediscover);
+    if (closed) return;
+    rediscover = setTimeout(() => {
+      if (socket) subscribe(socket);
+      rescheduleRediscovery();
+    }, rediscoverIntervalMs);
+    rediscover.unref();
   }
 
   function authenticate(current: RelaySocket, challenge: unknown) {
@@ -274,6 +321,12 @@ export function createNostrRelayTransport(
     }
     if (type === 'CLOSED') {
       if (message[1] !== subscriptionId) return;
+      const reason = typeof message[2] === 'string' ? message[2] : '';
+      if (reason === 'restricted: channel access revoked') {
+        for (const channel of [...autoChannels]) autoChannels.delete(channel);
+        if (socket) subscribe(socket);
+        return;
+      }
       if (!authenticating)
         disconnect(current, 'The Nostr relay closed the subscription. Nod is trying to reconnect.');
     }
@@ -363,6 +416,7 @@ export function createNostrRelayTransport(
 
   function connect() {
     if (closed || channel.status !== 'configured' || socket || !config.relayUrl) return;
+    rescheduleRediscovery();
     const current = (options.createSocket ?? ((url: string) => new WebSocket(url)))(
       config.relayUrl,
     );
@@ -401,7 +455,7 @@ export function createNostrRelayTransport(
       input.channelId !== 'nostr' ||
       input.accountId !== channel.accountId ||
       !parsed ||
-      !config.relayChannels.includes(parsed.relayChannel)
+      !joinedChannels().includes(parsed.relayChannel)
     )
       throw new Error('The Nostr relay target is unavailable.');
   }
@@ -455,6 +509,7 @@ export function createNostrRelayTransport(
       if (closed) return;
       closed = true;
       clearTimeout(reconnect);
+      clearTimeout(rediscover);
       for (const registered of pending.values()) for (const finish of registered) finish(false);
       pending.clear();
       incoming.length = 0;

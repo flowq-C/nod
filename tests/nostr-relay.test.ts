@@ -136,7 +136,6 @@ test('registers the nostr channel like the other chat channels', () => {
   assert.equal(incomplete.status, 'setup_required');
   assert.deepEqual([...incomplete.missing].sort(), [
     'NOSTR_ALLOWED_PUBKEYS',
-    'NOSTR_CHANNELS',
     'NOSTR_PRIVATE_KEY',
     'NOSTR_RELAY_URL',
   ]);
@@ -151,7 +150,6 @@ test('registers the nostr channel like the other chat channels', () => {
   assert.equal(invalid.status, 'setup_required');
   assert.deepEqual([...invalid.missing].sort(), [
     'NOSTR_ALLOWED_PUBKEYS',
-    'NOSTR_CHANNELS',
     'NOSTR_PRIVATE_KEY',
     'NOSTR_RELAY_URL',
   ]);
@@ -200,7 +198,17 @@ test('accepts addressed channel messages into their thread and drops the rest', 
       ],
     }),
   ]);
-  socket.message(['EVENT', 'sub', signEvent(senderSecret, { ...base, tags: [['h', 'room']] })]);
+  socket.message([
+    'EVENT',
+    'sub',
+    signEvent(senderSecret, {
+      ...base,
+      tags: [
+        ['h', 'room'],
+        ['p', strangerIdentity],
+      ],
+    }),
+  ]);
   socket.message([
     'EVENT',
     'sub',
@@ -252,13 +260,14 @@ test('answers NIP-42 authentication and restores the subscription', async () => 
   await transport.poll?.(collect);
   socket.open();
 
-  const first = socket.frames('REQ');
+  const chatRequests = () => socket.frames('REQ').filter((frame) => frame[1] === 'nod-nostr-relay');
+  const first = chatRequests();
   assert.equal(first.length, 1);
   assert.deepEqual(first[0][1], 'nod-nostr-relay');
   const filter = first[0][2] as Record<string, unknown>;
   assert.deepEqual(filter.kinds, [9]);
   assert.deepEqual(filter['#h'], ['room']);
-  assert.deepEqual(filter['#p'], [botIdentity]);
+  assert.equal(filter['#p'], undefined);
 
   socket.message(['AUTH', 'challenge-1']);
   const auth = socket.frames('AUTH')[0][1] as NostrRelayEvent;
@@ -270,7 +279,7 @@ test('answers NIP-42 authentication and restores the subscription', async () => 
   ]);
   assert.ok(verifyEvent(auth));
   socket.message(['OK', auth.id, true, '']);
-  assert.equal(socket.frames('REQ').length, 2);
+  assert.equal(chatRequests().length, 2);
 
   socket.message(['AUTH', 'challenge-2']);
   const again = socket.frames('AUTH')[1][1] as NostrRelayEvent;
@@ -281,7 +290,7 @@ test('answers NIP-42 authentication and restores the subscription', async () => 
   socket.message(['CLOSED', 'nod-nostr-relay', 'auth-required: restricted']);
   assert.equal(transport.channels[0].available, true);
   socket.message(['OK', again.id, true, '']);
-  assert.equal(socket.frames('REQ').length, 3);
+  assert.equal(chatRequests().length, 3);
 
   socket.message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
   assert.equal(transport.channels[0].available, false);
@@ -299,15 +308,17 @@ test('rebuilds the connection and the subscription after the relay closes it', a
   });
   const collect = async (_message: InboundMessage) => {};
   await transport.poll?.(collect);
+  const chatRequests = (socket: FakeSocket) =>
+    socket.frames('REQ').filter((frame) => frame[1] === 'nod-nostr-relay');
   sockets[0].open();
-  assert.equal(sockets[0].frames('REQ').length, 1);
+  assert.equal(chatRequests(sockets[0]).length, 1);
 
   sockets[0].message(['CLOSED', 'nod-nostr-relay', 'rate limited']);
   await sleep(1200);
   await transport.poll?.(collect);
   assert.equal(sockets.length, 2);
   sockets[1].open();
-  assert.equal(sockets[1].frames('REQ').length, 1);
+  assert.equal(chatRequests(sockets[1]).length, 1);
 });
 
 test('keeps at most one relay connection open across repeated failures', async () => {
@@ -1296,7 +1307,6 @@ test('the channel status masking follows the saved and managed configuration', a
     assert.equal(missing.status, 'setup_required');
     assert.deepEqual([...missing.missing].sort(), [
       'NOSTR_ALLOWED_PUBKEYS',
-      'NOSTR_CHANNELS',
       'NOSTR_PRIVATE_KEY',
       'NOSTR_RELAY_URL',
     ]);
