@@ -2956,23 +2956,19 @@ test(
             );
             return answer;
           };
-          // The second question still waits in the outbox: the yes belongs to the first.
           await mirror(pendingSecond.confirmation_message_id, 'pending', '0 seconds');
           await inbox('answer-1', '1 minute');
           assert.equal((await accept('answer-1'))?.approvalId, pendingFirst.id);
           assert.notEqual((await stored(pendingFirst.id)).status, 'pending');
-          // With the first one settled, a yes never reaches the unsent second question.
           await inbox('answer-2', '1 minute');
           assert.notEqual((await accept('answer-2'))?.approvalId, pendingSecond.id);
           assert.equal((await stored(pendingSecond.id)).status, 'pending');
-          // Sent only after the answer arrived is as unseen as not sent.
           await db.pool.query(
             "UPDATE channel_outbox SET state='sent',updated_at=now() WHERE message_id=$1",
             [pendingSecond.confirmation_message_id],
           );
           assert.notEqual((await accept('answer-2'))?.approvalId, pendingSecond.id);
           assert.equal((await stored(pendingSecond.id)).status, 'pending');
-          // Sent before the answer arrived: the yes now answers it.
           await inbox('answer-3', '1 second');
           await db.pool.query(
             "UPDATE channel_outbox SET updated_at=now()-interval '1 minute' WHERE message_id=$1",

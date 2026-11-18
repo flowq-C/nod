@@ -254,7 +254,6 @@ test('accepts addressed channel messages into their thread and drops the rest', 
     }),
   ]);
   await transport.poll?.(collect);
-  // The unaddressed event (no p tag) is accepted; the one addressed to a stranger is not.
   assert.equal(received.length, 2);
 });
 

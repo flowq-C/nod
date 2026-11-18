@@ -46,11 +46,15 @@ export function combineMessagingTransports(
       if (!transport?.progress) throw new Error('Channel progress is unavailable.');
       await transport.progress(input);
     },
-    async pairing() {
-      const transport = transports.findLast((transport) => transport.pairing);
-      if (!transport?.pairing) throw new Error('QR pairing is unavailable.');
-      return transport.pairing();
-    },
+    ...(transports.some((transport) => transport.pairing)
+      ? {
+          async pairing() {
+            const transport = transports.findLast((transport) => transport.pairing);
+            if (!transport?.pairing) throw new Error('QR pairing is unavailable.');
+            return transport.pairing();
+          },
+        }
+      : {}),
     async unlink() {
       for (const transport of transports) await transport.unlink?.();
     },
