@@ -2886,6 +2886,36 @@ test(
       );
 
       await t.test(
+        'a bare yes from the mirrored home channel answers a question asked in a web turn',
+        async () => {
+          const mirrored = await createApprovals(
+            async () => ({ successful: true }),
+            undefined,
+            async (reply) => reply === 'Yes',
+            async () => 'Approve the synthetic note?',
+            undefined,
+            'nostr',
+          );
+          const web = await begin('Synthetic web request');
+          await mirrored.request(web, 'NOD_notification_preferences_update', {
+            notificationRule: 'Synthetic mirrored rule',
+          });
+          const pending = await proposal(web.turnId);
+          await finish(web.turnId);
+          const reply = (channel: string) => ({ threadId: web.threadId, channel, text: 'Yes' });
+          assert.equal(await approvals.chat.answer(reply('nostr:fixture')), undefined);
+          assert.equal(await mirrored.chat.answer(reply('telegram:fixture')), undefined);
+          const answer = await mirrored.chat.answer(reply('nostr:fixture'));
+          assert.deepEqual(answer, { approvalId: pending.id, approved: true });
+          await transaction(
+            (client) => mirrored.chat.accept(client, { ...reply('nostr:fixture'), answer }),
+            db.pool,
+          );
+          assert.notEqual((await stored(pending.id)).status, 'pending');
+        },
+      );
+
+      await t.test(
         'a complete replacement approval repairs withdrawn schedule evidence once',
         async () => {
           const descriptions: ApprovalDescription[] = [];

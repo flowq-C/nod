@@ -83,7 +83,7 @@ function chatConfirmationSql(match: string) {
   FROM approvals a JOIN turns u ON u.id=a.turn_id
   WHERE ${match}
     AND a.owner_id=$2 AND u.owner_id=$2 AND a.thread_id=$3 AND u.thread_id=$3
-    AND (u.channel=$4 OR a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
+    AND (u.channel=$4 OR ($6::text IS NOT NULL AND u.channel='web' AND $4 LIKE $6::text) OR a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
       WHERE m.id=$5::uuid AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$5::uuid))
     AND EXISTS (SELECT 1 FROM messages c WHERE c.id=a.confirmation_message_id AND c.owner_id=a.owner_id AND c.hidden_at IS NULL)
     AND (to_jsonb(u)->>'task_id' IS NULL OR NOT EXISTS (
@@ -280,7 +280,10 @@ export async function createApprovals(
     signal?: AbortSignal,
   ) => Promise<string | ApprovalPresentation>,
   analytics?: CaptureAnalytics,
+  // Provider whose conversation mirrors web turns: its bare yes or no answers a web question too.
+  mirrorProvider?: string,
 ) {
+  const mirrored = mirrorProvider ? `${mirrorProvider}:%` : null;
   const changed = (
     status: 'asked' | 'approved' | 'declined' | 'executed' | 'expired' | 'uncertain',
     action: string,
@@ -574,13 +577,13 @@ export async function createApprovals(
       input.replyToMessageId ??
       (
         await pool.query(
-          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND u.channel=$3 AND m.role='assistant' AND m.hidden_at IS NULL
+          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND (u.channel=$3 OR ($5::text IS NOT NULL AND u.channel='web' AND $3 LIKE $5::text)) AND m.role='assistant' AND m.hidden_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',m.created_at))
            AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND n.thread_id=$2 AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
              AND (n.created_at,n.id)>(m.created_at,m.id)
              AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',n.created_at)))
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
-          [ownerId, input.threadId, input.channel, input.seenMessageId ?? null],
+          [ownerId, input.threadId, input.channel, input.seenMessageId ?? null, mirrored],
         )
       ).rows[0]?.id;
     if (!target) return undefined;
@@ -588,7 +591,7 @@ export async function createApprovals(
       await pool.query(
         chatConfirmationSql(`a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
          WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$1)`),
-        [target, ownerId, input.threadId, input.channel, input.replyToMessageId ?? null],
+        [target, ownerId, input.threadId, input.channel, input.replyToMessageId ?? null, mirrored],
       )
     ).rows[0];
   }
@@ -622,6 +625,7 @@ export async function createApprovals(
           input.threadId,
           input.channel,
           input.replyToMessageId ?? null,
+          mirrored,
         ],
       )
     ).rows[0];
