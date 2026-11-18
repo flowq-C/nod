@@ -209,6 +209,7 @@ test('accepts addressed channel messages into their thread and drops the rest', 
       ],
     }),
   ]);
+  socket.message(['EVENT', 'sub', signEvent(senderSecret, { ...base, tags: [['h', 'room']] })]);
   socket.message([
     'EVENT',
     'sub',
@@ -252,7 +253,8 @@ test('accepts addressed channel messages into their thread and drops the rest', 
     }),
   ]);
   await transport.poll?.(collect);
-  assert.equal(received.length, 1);
+  // The unaddressed event (no p tag) is accepted; the one addressed to a stranger is not.
+  assert.equal(received.length, 2);
 });
 
 test('answers NIP-42 authentication and restores the subscription', async () => {
