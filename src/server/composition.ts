@@ -3044,6 +3044,14 @@ async function initializeApplication(
       attributeMediaUsage: ledger.attributeMediaUsage,
       ...(channelSettings ? { pair: channelSettings.pair } : {}),
       transport: messaging,
+      ...(process.env.NOSTR_HOME_CHANNEL
+        ? {
+            mirror: {
+              provider: 'nostr',
+              threadId: (senderId: string) => `${process.env.NOSTR_HOME_CHANNEL}/${senderId}`,
+            },
+          }
+        : {}),
       isRetirableScheduleConfirmation: approvals.isRetirableScheduleConfirmation,
       classifyRetiredReply: (reply, expired) =>
         ledger.forOwner(() => trust.classifyRetiredReply(reply, expired)),

@@ -1603,6 +1603,76 @@ test(
 );
 
 test(
+  'web turns mirror into the home conversation through the outbox only when configured',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const { pool, threadId, posts, receive, turnOf, reply, create } = await outboxFixture(t);
+    const webTurn = async (offsetSeconds: number, prompt: string, answer: string) => {
+      const turnId = randomUUID();
+      await pool.query(
+        "INSERT INTO turns(id,owner_id,thread_id,channel) VALUES($1,'local-development',$2,'web')",
+        [turnId, threadId],
+      );
+      await pool.query(
+        `INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,created_at)
+         VALUES($1,'local-development','user',$2,$3,$4,now()+make_interval(secs=>$5)),
+               ($6,'local-development','assistant',$7,$3,$4,now()+make_interval(secs=>$5+1))`,
+        [randomUUID(), prompt, threadId, turnId, offsetSeconds, randomUUID(), answer],
+      );
+    };
+    const plain = await create();
+    try {
+      await webTurn(-30, 'Before mirroring', 'Old answer');
+      await plain.drain();
+      assert.equal(posts.length, 0);
+      assert.equal(
+        (await pool.query("SELECT 1 FROM channel_inbox WHERE state='mirror'")).rowCount,
+        0,
+      );
+    } finally {
+      await plain.close();
+    }
+
+    const channels = await create({
+      mirror: { provider: 'telegram', threadId: (senderId) => `home-${senderId}` },
+    });
+    try {
+      await webTurn(5, 'Spiegeltest', 'Web answer');
+      receive('222', 'buzz-question', 'buzz-chat');
+      await channels.drain();
+      const { turn_id: buzzTurn } = await turnOf('buzz-question');
+      await reply(buzzTurn, 'Buzz answer', randomUUID(), 10);
+      await channels.drain();
+      await until(() => posts.length === 3);
+      assert.deepEqual(
+        posts.map((post) => [post.threadId, post.text]),
+        [
+          ['home-111', '[Web] Spiegeltest'],
+          ['home-111', 'Web answer'],
+          ['buzz-chat', 'Buzz answer'],
+        ],
+      );
+      await channels.drain();
+      assert.equal(posts.length, 3);
+      assert.equal(
+        (await pool.query("SELECT 1 FROM channel_outbox WHERE state<>'sent'")).rowCount,
+        0,
+      );
+      assert.equal(
+        (
+          await pool.query(
+            "SELECT 1 FROM channel_inbox WHERE state='mirror' AND turn_id IS NOT NULL",
+          )
+        ).rowCount,
+        0,
+      );
+    } finally {
+      await channels.close();
+    }
+  },
+);
+
+test(
   'channel answer choices preserve the question and option meaning without changing stored text',
   { skip: !process.env.TEST_DATABASE_URL },
   async (t) => {

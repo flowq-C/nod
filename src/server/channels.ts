@@ -58,6 +58,8 @@ interface ChannelOptions {
   admission?: WorkAdmission;
   ownerId: string;
   transport: MessagingTransport;
+  // Mirrors web turns into one home conversation of this provider (first allowed sender).
+  mirror?: { provider: string; threadId: (senderId: string) => string };
   acceptVerification?: (
     text: string,
     input: {
@@ -147,6 +149,7 @@ interface InboxRow extends ChannelIdentity {
 }
 interface OutboxRow extends ChannelIdentity {
   message_id: string;
+  role: string;
   owner_id: string;
   message_thread_id: string | null;
   thread_id: string;
@@ -1140,6 +1143,42 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       ON CONFLICT(message_id) DO NOTHING`,
       [ownerId],
     );
+    await enqueueMirror();
+  }
+
+  // Web turns have no inbox row. A 'mirror' inbox row is the delivery route for them: it is never
+  // pending or submitted, so it cannot start a turn, and only messages after its creation follow it.
+  async function enqueueMirror() {
+    const channel = options.mirror
+      ? channels.find((item) => item.id === options.mirror!.provider)
+      : undefined;
+    const senderId = channel?.allowedSenderIds[0];
+    if (!options.mirror || !channel?.accountId || !senderId) return;
+    const identity = { provider: channel.id, account_id: channel.accountId, sender_id: senderId };
+    if (!permitted(identity)) return;
+    const route = await pool.query<{ source_id: string; created_at: Date }>(
+      `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,state,owner_id,channel)
+       VALUES($1,$2,$3,$4,$5,'',to_timestamp(0),'mirror',$6,$7)
+       ON CONFLICT(source_id) DO UPDATE SET thread_id=EXCLUDED.thread_id RETURNING source_id,created_at`,
+      [
+        `mirror:${channel.id}:${channel.accountId}:${senderId}`,
+        channel.id,
+        channel.accountId,
+        senderId,
+        options.mirror.threadId(senderId),
+        ownerId,
+        conversationChannel(identity),
+      ],
+    );
+    await pool.query(
+      `INSERT INTO channel_outbox(message_id,source_id)
+      SELECT m.id,$2 FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+      WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND u.channel='web' AND m.created_at>=$3
+        AND (m.role='assistant' OR (m.role='user' AND u.source='user' AND btrim(m.text)<>''))
+        AND NOT EXISTS (SELECT 1 FROM channel_outbox q WHERE q.message_id=m.id)
+      ON CONFLICT(message_id) DO NOTHING`,
+      [ownerId, route.rows[0]!.source_id, route.rows[0]!.created_at],
+    );
   }
 
   async function currentMessage(
@@ -1172,7 +1211,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       UPDATE channel_outbox SET state='preparing',claim_id=$2,updated_at=now() WHERE message_id=(
         SELECT o.message_id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id JOIN messages m ON m.id=o.message_id WHERE o.state='pending' AND i.owner_id=$1 AND m.owner_id=$1 AND NOT(i.provider=ANY($3::text[])) ORDER BY m.created_at,m.id FOR UPDATE OF o SKIP LOCKED LIMIT 1
       ) RETURNING message_id,source_id,presentation
-    ) SELECT c.message_id,m.owner_id,m.thread_id AS message_thread_id,i.provider,i.account_id,i.sender_id,i.thread_id,m.text,m.attachments,m.reply_to_message_id,c.presentation,m.presentation AS message_presentation,m.answer_choices,(${pendingAnswerChoicesSql}) AS answer_choices_pending,
+    ) SELECT c.message_id,m.role,m.owner_id,m.thread_id AS message_thread_id,i.provider,i.account_id,i.sender_id,i.thread_id,m.text,m.attachments,m.reply_to_message_id,c.presentation,m.presentation AS message_presentation,m.answer_choices,(${pendingAnswerChoicesSql}) AS answer_choices_pending,
       EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.handoff_browser_id IS NOT NULL
         AND m.id=(SELECT id FROM messages WHERE turn_id=u.id AND owner_id=u.owner_id AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1)) AS browser_handoff
       FROM claimed c JOIN channel_inbox i ON i.source_id=c.source_id JOIN messages m ON m.id=c.message_id`,
@@ -1264,7 +1303,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       const visual = presentationSchema.safeParse(row.message_presentation);
       const fallback = visual.success ? channelText(presentationText(visual.data)).text : '';
       const choices = answerChoicesSchema.safeParse(row.answer_choices);
-      const question = generated ?? row.text;
+      const question = row.role === 'user' ? `[Web] ${row.text}` : (generated ?? row.text);
       text = await channelReply(
         choices.success ? questionWithChoices(question, choices.data) : question,
         {
