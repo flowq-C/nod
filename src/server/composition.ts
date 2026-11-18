@@ -3140,8 +3140,8 @@ async function initializeApplication(
         ).turnId,
       stopSignal,
       messageAccepted: ownerMessageAccepted,
-      answer: (text, channel, replyToMessageId, mirrored) =>
-        userMessages.answer(text, { channel, replyToMessageId, mirrored }),
+      answer: (text, channel, replyToMessageId, mirrored, sourceId) =>
+        userMessages.answer(text, { channel, replyToMessageId, mirrored, sourceId }),
     });
     channels.registerRoutes(app);
     await channelSettings?.recover();

@@ -80,12 +80,17 @@ export type ChatConfirmationResult =
   | { waiting: { id: string; session_id: string; background: boolean } }
   | undefined;
 
-function chatConfirmationSql(match: string) {
+// A mirrored web question may be answered from the home room only once its mirror was sent before that answer arrived.
+const mirrorSentBefore = (messageId: string, sourceParam: string) =>
+  ` AND EXISTS (SELECT 1 FROM channel_outbox o WHERE o.message_id=${messageId} AND o.state='sent'
+      AND o.updated_at<(SELECT i.received_at FROM channel_inbox i WHERE i.source_id=${sourceParam} AND i.owner_id=$2))`;
+
+function chatConfirmationSql(match: string, mirrored = false) {
   return `SELECT a.*,u.source AS turn_source,u.status AS turn_status,u.background AS turn_background,u.session_id AS turn_session_id,u.prompt AS turn_prompt,to_jsonb(u)->>'task_id' AS turn_task_id
   FROM approvals a JOIN turns u ON u.id=a.turn_id
   WHERE ${match}
     AND a.owner_id=$2 AND u.owner_id=$2 AND a.thread_id=$3 AND u.thread_id=$3
-    AND (u.channel=$4 OR (u.channel='web' AND $6::boolean) OR a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
+    AND (u.channel=$4 OR (u.channel='web' AND $6::boolean${mirrored ? mirrorSentBefore('a.confirmation_message_id', '$7') : ''}) OR a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
       WHERE m.id=$5::uuid AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$5::uuid))
     AND EXISTS (SELECT 1 FROM messages c WHERE c.id=a.confirmation_message_id AND c.owner_id=a.owner_id AND c.hidden_at IS NULL)
     AND (to_jsonb(u)->>'task_id' IS NULL OR NOT EXISTS (
@@ -576,7 +581,7 @@ export async function createApprovals(
       input.replyToMessageId ??
       (
         await pool.query(
-          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND (u.channel=$3 OR (u.channel='web' AND $5::boolean)) AND m.role='assistant' AND m.hidden_at IS NULL
+          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND (u.channel=$3 OR (u.channel='web' AND $5::boolean${input.mirrored === true ? mirrorSentBefore('m.id', '$6').replace('$2', '$1') : ''})) AND m.role='assistant' AND m.hidden_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',m.created_at))
            AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND n.thread_id=$2 AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
              AND (n.created_at,n.id)>(m.created_at,m.id)
@@ -588,14 +593,18 @@ export async function createApprovals(
             input.channel,
             input.seenMessageId ?? null,
             input.mirrored === true,
+            ...(input.mirrored === true ? [input.sourceId ?? null] : []),
           ],
         )
       ).rows[0]?.id;
     if (!target) return undefined;
     return (
       await pool.query(
-        chatConfirmationSql(`a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
-         WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$1)`),
+        chatConfirmationSql(
+          `a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
+         WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$1)`,
+          input.mirrored === true,
+        ),
         [
           target,
           ownerId,
@@ -603,6 +612,7 @@ export async function createApprovals(
           input.channel,
           input.replyToMessageId ?? null,
           input.mirrored === true,
+          ...(input.mirrored === true ? [input.sourceId ?? null] : []),
         ],
       )
     ).rows[0];
@@ -633,7 +643,7 @@ export async function createApprovals(
     if (!input.answer) return undefined;
     const approval = (
       await client.query(
-        `${chatConfirmationSql(input.clicked ? 'a.id=$1 AND a.confirmation_message_id=$5' : 'a.id=$1')} FOR UPDATE OF a`,
+        `${chatConfirmationSql(input.clicked ? 'a.id=$1 AND a.confirmation_message_id=$5' : 'a.id=$1', input.answer.mirrored === true)} FOR UPDATE OF a`,
         [
           input.answer.approvalId,
           ownerId,
@@ -641,6 +651,7 @@ export async function createApprovals(
           input.channel,
           input.replyToMessageId ?? null,
           input.answer.mirrored === true,
+          ...(input.answer.mirrored === true ? [input.sourceId ?? null] : []),
         ],
       )
     ).rows[0];

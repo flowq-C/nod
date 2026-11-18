@@ -99,6 +99,7 @@ interface ChannelOptions {
     channel: string,
     replyToMessageId?: string,
     mirrored?: boolean,
+    sourceId?: string,
   ) => Promise<ChatConfirmationInput['answer']>;
   reacted?: (messageId: string, reaction: string | null) => Promise<unknown>;
   subscribe: (listener: () => void) => () => void;
@@ -1009,7 +1010,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       (pending.provider_reply_id && !replyToMessageId)
         ? undefined
         : await options
-            .answer?.(pending.text, channel, replyToMessageId, homePeer(pending))
+            .answer?.(pending.text, channel, replyToMessageId, homePeer(pending), pending.source_id)
             .catch(() => undefined);
     let afterCommit: (() => Promise<void>) | undefined;
     const replyTargetChanged = Symbol('reply target changed');

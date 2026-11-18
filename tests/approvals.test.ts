@@ -2885,6 +2885,104 @@ test(
         },
       );
 
+      const mirrorFixture = async () => {
+        await db.pool.query(`CREATE TABLE IF NOT EXISTS channel_inbox (
+          source_id text PRIMARY KEY, provider text NOT NULL, account_id text NOT NULL, sender_id text NOT NULL,
+          thread_id text NOT NULL, text text NOT NULL, received_at timestamptz NOT NULL,
+          turn_id uuid REFERENCES turns(id), state text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now(),
+          message_id uuid, owner_id text NOT NULL, channel text
+        );
+        CREATE TABLE IF NOT EXISTS channel_outbox (
+          message_id uuid PRIMARY KEY, source_id text NOT NULL REFERENCES channel_inbox(source_id),
+          state text NOT NULL DEFAULT 'pending', provider_message_id text, reason text,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+        )`);
+        const inbox = async (sourceId: string, receivedAgo: string) =>
+          db.pool.query(
+            `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,owner_id,channel)
+             VALUES($1,'nostr','home','peer','home-room','Yes',now()-$2::interval,$3,'nostr:fixture')`,
+            [sourceId, receivedAgo, ownerId],
+          );
+        let seed = 0;
+        const mirror = async (messageId: string, state: string, sentAgo: string) => {
+          const sourceId = `mirror-seed:${randomUUID()}:${seed++}`;
+          await inbox(sourceId, '1 hour');
+          await db.pool.query(
+            `INSERT INTO channel_outbox(message_id,source_id,state,updated_at) VALUES($1,$2,$3,now()-$4::interval)`,
+            [messageId, sourceId, state, sentAgo],
+          );
+        };
+        return { inbox, mirror };
+      };
+
+      await t.test(
+        'a bare yes from the home room never answers a mirrored question that was not sent before it arrived',
+        async () => {
+          const { inbox, mirror } = await mirrorFixture();
+          const mirrored = await createApprovals(
+            async () => ({ successful: true }),
+            undefined,
+            async (reply) => reply === 'Yes',
+            async () => 'Approve the synthetic note?',
+          );
+          const first = await begin('Synthetic first web request');
+          await mirrored.request(first, 'NOD_notification_preferences_update', {
+            notificationRule: 'Synthetic first rule',
+          });
+          const pendingFirst = await proposal(first.turnId);
+          await finish(first.turnId);
+          const second = await begin('Synthetic second web request');
+          await mirrored.request(second, 'NOD_notification_preferences_update', {
+            notificationRule: 'Synthetic second rule',
+          });
+          const pendingSecond = await proposal(second.turnId);
+          await finish(second.turnId);
+          assert.equal(first.threadId, second.threadId);
+          await mirror(pendingFirst.confirmation_message_id, 'sent', '10 minutes');
+          const reply = async (sourceId: string) => ({
+            threadId: first.threadId,
+            channel: 'nostr:fixture',
+            text: 'Yes',
+            mirrored: true,
+            sourceId,
+          });
+          const accept = async (sourceId: string) => {
+            const input = await reply(sourceId);
+            const answer = await mirrored.chat.answer(input);
+            if (!answer) return undefined;
+            await transaction(
+              (client) => mirrored.chat.accept(client, { ...input, answer }),
+              db.pool,
+            );
+            return answer;
+          };
+          // The second question still waits in the outbox: the yes belongs to the first.
+          await mirror(pendingSecond.confirmation_message_id, 'pending', '0 seconds');
+          await inbox('answer-1', '1 minute');
+          assert.equal((await accept('answer-1'))?.approvalId, pendingFirst.id);
+          assert.notEqual((await stored(pendingFirst.id)).status, 'pending');
+          // With the first one settled, a yes never reaches the unsent second question.
+          await inbox('answer-2', '1 minute');
+          assert.notEqual((await accept('answer-2'))?.approvalId, pendingSecond.id);
+          assert.equal((await stored(pendingSecond.id)).status, 'pending');
+          // Sent only after the answer arrived is as unseen as not sent.
+          await db.pool.query(
+            "UPDATE channel_outbox SET state='sent',updated_at=now() WHERE message_id=$1",
+            [pendingSecond.confirmation_message_id],
+          );
+          assert.notEqual((await accept('answer-2'))?.approvalId, pendingSecond.id);
+          assert.equal((await stored(pendingSecond.id)).status, 'pending');
+          // Sent before the answer arrived: the yes now answers it.
+          await inbox('answer-3', '1 second');
+          await db.pool.query(
+            "UPDATE channel_outbox SET updated_at=now()-interval '1 minute' WHERE message_id=$1",
+            [pendingSecond.confirmation_message_id],
+          );
+          assert.equal((await accept('answer-3'))?.approvalId, pendingSecond.id);
+          assert.notEqual((await stored(pendingSecond.id)).status, 'pending');
+        },
+      );
+
       await t.test(
         'a bare yes from the mirrored home channel answers a question asked in a web turn',
         async () => {
@@ -2900,10 +2998,14 @@ test(
           });
           const pending = await proposal(web.turnId);
           await finish(web.turnId);
+          const home = await mirrorFixture();
+          await home.mirror(pending.confirmation_message_id, 'sent', '10 minutes');
+          await home.inbox('existing-answer', '1 minute');
           const reply = (channel: string, mirroredPeer?: boolean) => ({
             threadId: web.threadId,
             channel,
             text: 'Yes',
+            sourceId: 'existing-answer',
             ...(mirroredPeer === undefined ? {} : { mirrored: mirroredPeer }),
           });
           // Another room or another sender in a mirrored provider carries no home-peer flag.
