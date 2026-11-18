@@ -1761,7 +1761,6 @@ async function initializeApplication(
     (reply) => ledger.forOwner(() => trust.answer(reply)),
     communication.describe,
     captureAnalytics,
-    process.env.NOSTR_HOME_CHANNEL ? 'nostr' : undefined,
   );
   retireScheduleConfirmations = approvals.retireScheduleConfirmations;
   let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
@@ -3141,8 +3140,8 @@ async function initializeApplication(
         ).turnId,
       stopSignal,
       messageAccepted: ownerMessageAccepted,
-      answer: (text, channel, replyToMessageId) =>
-        userMessages.answer(text, { channel, replyToMessageId }),
+      answer: (text, channel, replyToMessageId, mirrored) =>
+        userMessages.answer(text, { channel, replyToMessageId, mirrored }),
     });
     channels.registerRoutes(app);
     await channelSettings?.recover();

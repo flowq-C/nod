@@ -98,6 +98,7 @@ interface ChannelOptions {
     text: string,
     channel: string,
     replyToMessageId?: string,
+    mirrored?: boolean,
   ) => Promise<ChatConfirmationInput['answer']>;
   reacted?: (messageId: string, reaction: string | null) => Promise<unknown>;
   subscribe: (listener: () => void) => () => void;
@@ -1007,7 +1008,9 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       pending.attachments?.length ||
       (pending.provider_reply_id && !replyToMessageId)
         ? undefined
-        : await options.answer?.(pending.text, channel, replyToMessageId).catch(() => undefined);
+        : await options
+            .answer?.(pending.text, channel, replyToMessageId, homePeer(pending))
+            .catch(() => undefined);
     let afterCommit: (() => Promise<void>) | undefined;
     const replyTargetChanged = Symbol('reply target changed');
     const submitted = await transaction(async (client) => {
@@ -1148,6 +1151,14 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
 
   // Web turns have no inbox row. A 'mirror' inbox row is the delivery route for them: it is never
   // pending or submitted, so it cannot start a turn, and only messages after its creation follow it.
+  // True only for the mirror peer (first allowed sender) writing in the configured home room.
+  function homePeer(row: InboxRow) {
+    const mirror = options.mirror;
+    if (!mirror || row.provider !== mirror.provider) return false;
+    const peer = channels.find((item) => item.id === mirror.provider)?.allowedSenderIds[0];
+    return row.sender_id === peer && row.thread_id === mirror.threadId(row.sender_id);
+  }
+
   async function enqueueMirror() {
     const channel = options.mirror
       ? channels.find((item) => item.id === options.mirror!.provider)

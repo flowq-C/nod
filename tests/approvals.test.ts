@@ -2893,8 +2893,6 @@ test(
             undefined,
             async (reply) => reply === 'Yes',
             async () => 'Approve the synthetic note?',
-            undefined,
-            'nostr',
           );
           const web = await begin('Synthetic web request');
           await mirrored.request(web, 'NOD_notification_preferences_update', {
@@ -2902,13 +2900,32 @@ test(
           });
           const pending = await proposal(web.turnId);
           await finish(web.turnId);
-          const reply = (channel: string) => ({ threadId: web.threadId, channel, text: 'Yes' });
-          assert.equal(await approvals.chat.answer(reply('nostr:fixture')), undefined);
-          assert.equal(await mirrored.chat.answer(reply('telegram:fixture')), undefined);
-          const answer = await mirrored.chat.answer(reply('nostr:fixture'));
-          assert.deepEqual(answer, { approvalId: pending.id, approved: true });
+          const reply = (channel: string, mirroredPeer?: boolean) => ({
+            threadId: web.threadId,
+            channel,
+            text: 'Yes',
+            ...(mirroredPeer === undefined ? {} : { mirrored: mirroredPeer }),
+          });
+          // Another room or another sender in a mirrored provider carries no home-peer flag.
+          assert.equal(await mirrored.chat.answer(reply('nostr:fixture')), undefined);
+          assert.equal(await mirrored.chat.answer(reply('nostr:fixture', false)), undefined);
+          const answer = await mirrored.chat.answer(reply('nostr:fixture', true));
+          assert.deepEqual(answer, { approvalId: pending.id, approved: true, mirrored: true });
+          // A forged answer without the flag cannot accept the web question.
+          assert.equal(
+            await transaction(
+              (client) =>
+                mirrored.chat.accept(client, {
+                  ...reply('nostr:fixture'),
+                  answer: { approvalId: pending.id, approved: true },
+                }),
+              db.pool,
+            ),
+            undefined,
+          );
+          assert.equal((await stored(pending.id)).status, 'pending');
           await transaction(
-            (client) => mirrored.chat.accept(client, { ...reply('nostr:fixture'), answer }),
+            (client) => mirrored.chat.accept(client, { ...reply('nostr:fixture', true), answer }),
             db.pool,
           );
           assert.notEqual((await stored(pending.id)).status, 'pending');
