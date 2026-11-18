@@ -2,6 +2,9 @@ import type { ChannelLinkStatus } from '../shared/contracts.ts';
 
 export class MessagingConnectionError extends Error {}
 
+// Thrown before anything reached the provider, so the delivery can be retried safely.
+export class MessagingNotSentError extends Error {}
+
 export class MessagingAttachmentError extends Error {
   constructor(readonly maxBytes: number) {
     super('The channel file is too large.');

@@ -2,10 +2,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { z } from 'zod';
 import { logRepeatedFailure } from '../../ports/failure-log.ts';
-import type {
-  InboundMessage,
-  MessagingChannel,
-  MessagingTransport,
+import {
+  MessagingNotSentError,
+  type InboundMessage,
+  type MessagingChannel,
+  type MessagingTransport,
 } from '../../ports/messaging.ts';
 
 type Environment = Record<string, string | undefined>;
@@ -457,10 +458,11 @@ export function createNostrRelayTransport(
       !parsed ||
       !joinedChannels().includes(parsed.relayChannel)
     )
-      throw new Error('The Nostr relay target is unavailable.');
+      throw new MessagingNotSentError('The Nostr relay target is unavailable.');
   }
   function connected() {
-    if (!socket || !channel.available) throw new Error('The Nostr relay is disconnected.');
+    if (!socket || !channel.available)
+      throw new MessagingNotSentError('The Nostr relay is disconnected.');
     return socket;
   }
 

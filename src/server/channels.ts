@@ -13,7 +13,7 @@ import { languageText } from './communication.ts';
 import { ChannelMediaFailure, type ChannelMedia } from './channel-media.ts';
 import type { WorkAdmission } from './work-admission.ts';
 import type { LiveWork } from './activity.ts';
-import { MessagingConnectionError } from '../ports/messaging.ts';
+import { MessagingConnectionError, MessagingNotSentError } from '../ports/messaging.ts';
 import type {
   ChannelPairingRequest,
   InboundMessage,
@@ -1488,17 +1488,19 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       );
     } catch (cause) {
       logFailure('channel_send_failed', cause);
+      // A rejection before anything reached the provider is a safe retry, not an unconfirmed send.
+      const unconfirmed = postStarted && !(cause instanceof MessagingNotSentError);
       await pool.query(
         `UPDATE channel_outbox SET state=$3,reason=$4,claim_id=NULL,updated_at=now()
          WHERE message_id=$1 AND claim_id=$2 AND state='sending'`,
         [
           row.message_id,
           claimId,
-          postStarted ? 'uncertain' : 'pending',
-          postStarted ? 'send_not_confirmed' : null,
+          unconfirmed ? 'uncertain' : 'pending',
+          unconfirmed ? 'send_not_confirmed' : null,
         ],
       );
-      if (!postStarted) return false;
+      if (!unconfirmed) return false;
     }
     return true;
   }

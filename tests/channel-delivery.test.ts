@@ -10,7 +10,7 @@ import Fastify from 'fastify';
 import pg from 'pg';
 import type { ChannelSetupConfiguration } from '../src/ports/channel-settings.ts';
 import type { InboundMessage, MessagingTransport } from '../src/ports/messaging.ts';
-import { MessagingConnectionError } from '../src/ports/messaging.ts';
+import { MessagingConnectionError, MessagingNotSentError } from '../src/ports/messaging.ts';
 import { createChatSdkTransport } from '../src/providers/chat-sdk/index.ts';
 import { createChatSdkSetupVerifier } from '../src/providers/chat-sdk/settings.ts';
 import {
@@ -1666,6 +1666,45 @@ test(
         ).rowCount,
         0,
       );
+    } finally {
+      await channels.close();
+    }
+  },
+);
+
+test(
+  'a send rejected before publish stays deliverable while an unconfirmed send becomes uncertain',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const { pool, posts, receive, turnOf, reply, create, transport } = await outboxFixture(t);
+    const post = transport.post;
+    let mode: 'before' | 'after' | 'ok' = 'before';
+    transport.post = async (input) => {
+      if (mode === 'before') throw new MessagingNotSentError('The relay is not connected yet.');
+      if (mode === 'after') throw new Error('Connection lost after the request.');
+      return post(input);
+    };
+    const channels = await create();
+    try {
+      receive('111', 'early', 'chat-early');
+      await channels.drain();
+      const { turn_id: turnId } = await turnOf('early');
+      const first = randomUUID();
+      await reply(turnId, 'First answer', first, 0);
+      await channels.drain();
+      const row = async (id: string) =>
+        (await pool.query('SELECT state,reason FROM channel_outbox WHERE message_id=$1', [id]))
+          .rows[0];
+      assert.deepEqual(await row(first), { state: 'pending', reason: null });
+      mode = 'ok';
+      await channels.drain();
+      await until(() => posts.length === 1);
+      assert.equal((await row(first)).state, 'sent');
+      mode = 'after';
+      const second = randomUUID();
+      await reply(turnId, 'Second answer', second, 1);
+      await channels.drain();
+      assert.deepEqual(await row(second), { state: 'uncertain', reason: 'send_not_confirmed' });
     } finally {
       await channels.close();
     }
