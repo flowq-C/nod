@@ -1638,10 +1638,10 @@ test(
     });
     try {
       await webTurn(5, 'Spiegeltest', 'Web answer');
-      receive('222', 'buzz-question', 'buzz-chat');
+      receive('222', 'relay-question', 'relay-chat');
       await channels.drain();
-      const { turn_id: buzzTurn } = await turnOf('buzz-question');
-      await reply(buzzTurn, 'Buzz answer', randomUUID(), 10);
+      const { turn_id: relayTurn } = await turnOf('relay-question');
+      await reply(relayTurn, 'Relay answer', randomUUID(), 10);
       await channels.drain();
       await until(() => posts.length === 3);
       assert.deepEqual(
@@ -1649,7 +1649,7 @@ test(
         [
           ['home-111', '[Web] Spiegeltest'],
           ['home-111', 'Web answer'],
-          ['buzz-chat', 'Buzz answer'],
+          ['relay-chat', 'Relay answer'],
         ],
       );
       await channels.drain();
