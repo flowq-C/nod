@@ -63,11 +63,13 @@ import { createIntegrationBrowser } from '../src/server/integration-browser.ts';
 import {
   createDiscoveredTransport,
   ownerAddress,
+  ownerFetch,
   safeRemoteFetch,
 } from '../src/providers/discovered/remote.ts';
 import { createAgentRuntime } from '../src/runtime/index.ts';
 import { createDiscoveredOAuth } from '../src/providers/discovered/oauth.ts';
 import { createDiscoveredConnections } from '../src/server/discovered-connections.ts';
+import { transaction } from '../src/server/transaction.ts';
 import { registerLocalAccess } from '../src/server/access.ts';
 import { createIntegrations, initializeIntegrationSchema } from '../src/server/integrations.ts';
 import { cachedIcons } from '../src/server/link-previews.ts';
@@ -490,6 +492,18 @@ test('app access paths reject inconsistent API reads and more than 16 CLI fields
     false,
   );
   assert.throws(() => appRequestUrl(path.endpoint, 'account#private'), /path/);
+  assert.equal(
+    appRequestUrl(path.endpoint, '/images:annotate'),
+    'https://api.synthetic-nod.dev/v1/images:annotate',
+  );
+  for (const escape of [
+    '/../x',
+    '/%2e%2e/x',
+    '/x:y/../../z',
+    'http://evil.synthetic-nod.dev/x',
+    '//evil.synthetic-nod.dev/x',
+  ])
+    assert.throws(() => appRequestUrl(path.endpoint, escape), /saved API address/);
 });
 
 test(
@@ -1003,7 +1017,12 @@ test('app skills cannot shadow core guides or load without a trusted root', asyn
   assert.equal(library.read('community-guide').content, body);
   await mkdir(join(builtin, 'community-guide'));
   await writeFile(join(builtin, 'community-guide/SKILL.md'), body);
-  assert.throws(() => createSkillLibrary([builtin, apps], ['artifacts']), /metadata is invalid/);
+  assert.throws(
+    () => createSkillLibrary([builtin, apps], ['artifacts']),
+    (error: Error) =>
+      error.message.includes('community-guide') &&
+      ['builtin', 'apps'].every((root) => error.message.includes(join(root, 'community-guide'))),
+  );
 });
 
 test('published app schemas reject unsupported definitions with the runtime validators', async () => {
@@ -1334,6 +1353,135 @@ function fakeProvider(session: IntegrationSession): IntegrationProvider {
     },
   };
 }
+
+test('remote MCP calls ask the server for progress so long calls can keep reporting', async (t) => {
+  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+  const { StreamableHTTPServerTransport } =
+    await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+  const server = createServer(async (request, response) => {
+    const mcp = new McpServer({ name: 'synthetic-jobs', version: '1' });
+    mcp.registerTool('long-job', { description: 'Run a long job' }, async (extra) => {
+      const progressToken = extra._meta?.progressToken;
+      if (progressToken === undefined)
+        return { content: [{ type: 'text', text: 'no progress token' }] };
+      for (const progress of [1, 2])
+        await extra.sendNotification({
+          method: 'notifications/progress',
+          params: { progressToken, progress, total: 3 },
+        });
+      return { content: [{ type: 'text', text: 'synthetic job result' }] };
+    });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    response.on('close', () => void transport.close());
+    await mcp.connect(transport);
+    await transport.handleRequest(request, response);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const transport = createDiscoveredTransport(ownerFetch(origin), async (value) => value);
+  assert.deepEqual(await transport.callTool(`${origin}/mcp`, {}, 'long-job', {}), {
+    content: [{ type: 'text', text: 'synthetic job result' }],
+  });
+});
+
+test('remote MCP falls back to HTTP+SSE only when the server refuses Streamable HTTP', async (t) => {
+  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+  const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
+  const token = 'synthetic-legacy-token';
+  const sessions = new Map<string, InstanceType<typeof SSEServerTransport>>();
+  const streams: string[] = [];
+  let failure: 'post' | 'stream' | undefined;
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url!, 'http://localhost');
+    const label = String(request.headers['x-fixture-case']);
+    if (url.pathname === '/mcp' && request.method === 'GET') streams.push(label);
+    if (request.headers.authorization !== `Bearer ${token}`) {
+      response.writeHead(401).end();
+      return;
+    }
+    if (url.pathname === '/mcp' && request.method === 'POST') {
+      response.writeHead(label === 'server-error' ? 500 : 405).end();
+      return;
+    }
+    if (url.pathname === '/mcp' && request.method === 'GET') {
+      const transport = new SSEServerTransport('/messages', response);
+      sessions.set(transport.sessionId, transport);
+      const mcp = new McpServer({ name: 'synthetic-legacy', version: '1' });
+      mcp.registerTool('legacy-echo', { description: 'Echo' }, async () => ({
+        content: [{ type: 'text', text: 'synthetic legacy reply' }],
+      }));
+      await mcp.connect(transport);
+      return;
+    }
+    const session = sessions.get(url.searchParams.get('sessionId') ?? '');
+    if (url.pathname === '/messages' && session) {
+      if (failure) {
+        const current = failure;
+        failure = undefined;
+        if (current === 'post') response.writeHead(429).end('Synthetic rate limit.');
+        else {
+          response.writeHead(202).end();
+          await session.close();
+        }
+        return;
+      }
+      await session.handlePostMessage(request, response);
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const endpoint = `${origin}/mcp`;
+  const transport = createDiscoveredTransport(ownerFetch(origin), async (value) => value);
+  const legacy = { authorization: `Bearer ${token}`, 'x-fixture-case': 'legacy' };
+  const listed = await transport.listTools(endpoint, legacy);
+  assert.deepEqual(
+    listed.tools.map((tool) => tool.name),
+    ['legacy-echo'],
+  );
+  assert.deepEqual(await transport.callTool(endpoint, legacy, 'legacy-echo', {}), {
+    content: [{ type: 'text', text: 'synthetic legacy reply' }],
+  });
+  await assert.rejects(
+    transport.listTools(endpoint, {
+      authorization: 'Bearer synthetic-wrong-token',
+      'x-fixture-case': 'unauthorized',
+    }),
+  );
+  await assert.rejects(
+    transport.listTools(endpoint, { ...legacy, 'x-fixture-case': 'server-error' }),
+  );
+  const unreachable = createDiscoveredTransport(
+    ownerFetch('http://127.0.0.1:1'),
+    async (value) => value,
+  );
+  await assert.rejects(unreachable.listTools('http://127.0.0.1:1/mcp', legacy), /ECONNREFUSED/);
+  assert.deepEqual(streams, ['legacy']);
+  failure = 'post';
+  await assert.rejects(
+    transport.callTool(endpoint, legacy, 'legacy-echo', {}),
+    /HTTP 429.*Synthetic rate limit\./,
+  );
+  assert.deepEqual(streams, ['legacy']);
+  await transport.listTools(endpoint, legacy);
+  failure = 'stream';
+  await assert.rejects(
+    transport.callTool(endpoint, legacy, 'legacy-echo', {}, AbortSignal.timeout(5000)),
+    /Connection closed/,
+  );
+  assert.deepEqual(streams, ['legacy', 'legacy']);
+  await transport.listTools(endpoint, legacy);
+  assert.deepEqual(streams, ['legacy', 'legacy', 'legacy']);
+});
 
 test(
   'installation identity checkpoints prevent replacement after file loss and recover interrupted first initialization',
@@ -6537,6 +6685,7 @@ test(
     const states: string[] = [];
     const issuer = 'https://auth.fixture.example';
     let issSupported = true;
+    let beginFails = false;
     let finished = 0;
     let finishStarted: () => void = () => {};
     let finishRelease: () => void = () => {};
@@ -6559,6 +6708,7 @@ test(
       },
       oauth: {
         begin: async (_endpoint: string, redirectUri: string, state: string) => {
+          if (beginFails) throw new Error('Synthetic start failure');
           states.push(state);
           return {
             url: `https://fixture.example/authorize?state=${state}`,
@@ -6704,9 +6854,17 @@ test(
       (await app.inject({ url: path, headers: { host: headers.host } })).statusCode,
       401,
     );
-    assert.equal(await callback(states[0], 'error=access_denied'), 'cancelled');
+    assert.equal(
+      await callback(
+        states[0],
+        'error=access_denied&error_description=Declined&error_description=Declined',
+      ),
+      'cancelled',
+    );
     assert.equal((await status()).oauthStatus, 'cancelled');
+    assert.equal((await status()).oauthError, undefined);
     assert.equal((await rawStatus(first.json().url)).apps[0].available, false);
+    assert.equal((await rawStatus(first.json().url)).apps[0].error, undefined);
     assert.notEqual((await setupStatus()).apps[0].available, false);
     const firstHash = createHash('sha256').update(first.json().url).digest('hex');
     const mixed = await app.inject({
@@ -6735,18 +6893,49 @@ test(
     assert.equal((await status()).oauthStatus, 'pending');
     assert.equal(await callback(states[1], 'code=fail'), 'failed');
     assert.equal((await status()).oauthStatus, 'failed');
+    assert.match((await status()).oauthError, /Synthetic exchange failure/);
+    assert.match(
+      (await rawStatus(authorizations.get(states[1])!.url)).apps[0].error,
+      /Synthetic exchange failure/,
+    );
+    assert.equal((await setupStatus()).apps[0].error, undefined);
+    beginFails = true;
+    assert.equal((await authorize({ restart: true })).statusCode, 502);
+    assert.equal((await status()).oauthError, undefined);
+    beginFails = false;
     assert.equal((await rawStatus(authorizations.get(states[1])!.url)).apps[0].available, false);
     assert.notEqual((await setupStatus()).apps[0].available, false);
     assert.equal((await authorize()).statusCode, 200);
-    assert.equal(states.length, 3);
+    assert.equal((await status()).oauthError, undefined);
+    assert.equal(
+      await callback(
+        states[2],
+        `error=invalid_request&error_description=${encodeURIComponent('Synthetic resource parameter refused.\0 Bearer synthetic-private-leak')}`,
+      ),
+      'failed',
+    );
+    assert.equal((await status()).oauthStatus, 'failed');
+    assert.match(
+      (await status()).oauthError,
+      /invalid_request.*Synthetic resource parameter refused/,
+    );
+    const refused = (await rawStatus(authorizations.get(states[2])!.url)).apps[0];
+    assert.equal(refused.available, false);
+    assert.match(refused.error, /invalid_request.*Synthetic resource parameter refused/);
+    assert.ok(!refused.error.includes('synthetic-private'));
+    assert.equal((await authorize()).statusCode, 200);
+    assert.equal(await callback(states[3], 'error='), 'failed');
+    assert.match((await status()).oauthError, /no authorization code/);
+    assert.equal((await authorize()).statusCode, 200);
+    assert.equal(states.length, 5);
     assert.equal(await callback(states[1], 'code=fixture-code'), 'expired');
     assert.equal((await status()).oauthStatus, 'pending');
-    const interrupted = callback(states[2], 'code=hold');
+    const interrupted = callback(states[4], 'code=hold');
     await finishing;
-    assert.equal((await rawStatus(authorizations.get(states[2])!.url)).apps[0].available, true);
+    assert.equal((await rawStatus(authorizations.get(states[4])!.url)).apps[0].available, true);
     assert.equal((await authorize()).statusCode, 409);
     assert.equal((await authorize({ restart: true, returnTo: 'window' })).statusCode, 409);
-    assert.equal(await callback(states[2], 'code=fixture-code'), 'expired');
+    assert.equal(await callback(states[4], 'code=fixture-code'), 'expired');
     assert.equal(finished, 2);
     await createDiscoveredConnections(f.pool, { ...options, ownerId: 'foreign-owner' });
     assert.equal((await status()).oauthStatus, 'pending');
@@ -6754,19 +6943,19 @@ test(
     assert.equal((await status()).oauthStatus, 'failed');
     await assert.rejects(grantVault.read(id!));
     assert.equal((await authorize()).statusCode, 200);
-    assert.equal(states.length, 4);
+    assert.equal(states.length, 6);
     finishRelease();
     assert.equal(await interrupted, 'failed');
     assert.equal((await status()).oauthStatus, 'pending');
-    assert.equal(await callback(states[2], 'code=fixture-code'), 'expired');
-    assert.equal(await callback(states[3], 'code=fixture-code', ''), 'failed');
+    assert.equal(await callback(states[4], 'code=fixture-code'), 'expired');
+    assert.equal(await callback(states[5], 'code=fixture-code', ''), 'failed');
     issSupported = false;
     assert.equal((await authorize()).statusCode, 200);
-    assert.equal(await callback(states[4], 'code=fixture-code', 'https://other.example'), 'failed');
+    assert.equal(await callback(states[6], 'code=fixture-code', 'https://other.example'), 'failed');
     assert.equal((await authorize()).statusCode, 200);
-    assert.equal(states.length, 6);
+    assert.equal(states.length, 8);
     assert.equal(finished, 2);
-    assert.equal(await callback(states[5], 'code=fixture-code', ''), 'connected');
+    assert.equal(await callback(states[7], 'code=fixture-code', ''), 'connected');
     assert.equal((await status()).oauthStatus, 'connected');
     assert.deepEqual(await setupStatus(), { completed: [setupHash], apps: [] });
     await createDiscoveredConnections(f.pool, options);
@@ -7385,6 +7574,47 @@ test(
     assert.equal(pairingChecks.mock.callCount(), 1);
     assert.deepEqual(await read(recovered, foreign.url), expected);
     assert.equal(pairingChecks.mock.callCount(), 1);
+  },
+);
+
+test(
+  'an action the connection service does not offer is refused before any app request',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const f = await appsFixture(t);
+    await f.connect('slack');
+    f.sessions.length = 0;
+    let offered: boolean | Error = false;
+    f.session.offers = async () => {
+      if (offered instanceof Error) throw offered;
+      return offered;
+    };
+    await assert.rejects(
+      f.service.assertOffered('local-development', 'SLACK_POST_MESSAGE'),
+      (error: Error & { statusCode?: number }) => {
+        assert.equal(error.statusCode, 404);
+        assert.ok(error.message.includes('SLACK_POST_MESSAGE'));
+        return true;
+      },
+    );
+    assert.equal(f.sessions.length, 1);
+    assert.equal(f.executed.length, 0);
+    offered = new Error('lookup unavailable');
+    await f.service.assertOffered('local-development', 'SLACK_POST_MESSAGE');
+    offered = true;
+    await f.service.assertOffered('local-development', 'SLACK_SEND_MESSAGE');
+    offered = false;
+    const lookups = f.sessions.length;
+    await f.service.assertOffered('local-development', 'SLACK_SEND_MESSAGE');
+    t.mock.method(f.session, 'search', async () => ({
+      tools: { SLACK_FIND_CHANNELS: {} },
+      suggestions: [],
+    }));
+    await f.service.execute('local-development', 'SEARCH_TOOLS', { query: 'find channels' });
+    const searched = f.sessions.length;
+    await f.service.assertOffered('local-development', 'SLACK_FIND_CHANNELS');
+    assert.equal(lookups, 3);
+    assert.equal(f.sessions.length, searched);
   },
 );
 
@@ -9018,7 +9248,22 @@ test(
     }
     assert.equal((await create({ ...input, clientIdRequired: 'true' })).statusCode, 400);
     assert.equal((await create({ ...input, ownerId: 'foreign-owner' })).statusCode, 400);
+    assert.equal((await create({ ...input, name: '   ' })).statusCode, 400);
     assert.equal((await pool.query('SELECT id FROM discovered_connection_proposals')).rowCount, 0);
+    const named = await create({
+      ...input,
+      name: 'Example Work (n8n)',
+      endpoint: 'https://93.184.216.34/named',
+    });
+    assert.equal(named.statusCode, 200, named.body);
+    assert.equal(
+      (
+        await pool.query('SELECT name FROM discovered_connection_proposals WHERE id=$1', [
+          named.json().id,
+        ])
+      ).rows[0].name,
+      'Example Work (n8n)',
+    );
     const response = await create(input);
     assert.equal(response.statusCode, 200, response.body);
     assert.equal(response.headers['cache-control'], 'no-store');
@@ -9739,6 +9984,552 @@ test(
       assert.notEqual(await account(), replacedAccount);
     } finally {
       await app.close();
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    }
+  },
+);
+
+test(
+  'HTTP confirmation context keeps the exact request and connection binding',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async () => {
+    const schema = `test_http_context_${randomUUID().replaceAll('-', '')}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = new pg.Pool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: `-c search_path=${schema}`,
+    });
+    try {
+      const owner = 'synthetic-http-context-owner';
+      const key = randomBytes(32);
+      const grantVault = await createAppGrantVault(pool, {
+        ownerId: owner,
+        keyStore: { id: 'fixture', configured: true, getKey: async () => key },
+      });
+      const calls: unknown[] = [];
+      const discovered = await createDiscoveredConnections(pool, {
+        ownerId: owner,
+        baseUrl: 'http://localhost:4310',
+        grantVault,
+        transport: {
+          validateEndpoint: async (value) => value,
+          http: async (url, headers, method, body) => {
+            assert.equal(headers.Authorization, 'Bearer synthetic-http-context-secret');
+            calls.push({ url, method, body });
+            return { status: 200, body: { records: 2 } };
+          },
+          listTools: async () => assert.fail('HTTP context must not load an MCP catalog.'),
+          callTool: async () => assert.fail('HTTP context must not call an MCP tool.'),
+        },
+        oauth: {} as Parameters<typeof createDiscoveredConnections>[1]['oauth'],
+      });
+      const connectionId = randomUUID();
+      const pathId = randomUUID();
+      const path = {
+        id: pathId,
+        kind: 'http',
+        endpoint: 'https://api.example.test/v2',
+        auth: 'bearer',
+      };
+      await pool.query(
+        'INSERT INTO discovered_connections(id,owner_id,service,name,account_name,paths) VALUES($1,$2,$3,$4,$5,$6)',
+        [
+          connectionId,
+          owner,
+          'http-context',
+          'Synthetic HTTP API',
+          'Synthetic account',
+          JSON.stringify([path]),
+        ],
+      );
+      await grantVault.put(connectionId, 'synthetic-http-context-secret');
+      for (const [method, body] of [
+        ['GET', { ignored: true }],
+        ['POST', { label: 'Synthetic record', enabled: false }],
+        ['PUT', null],
+        ['PATCH', ['Synthetic value']],
+        ['DELETE', 0],
+      ] as const) {
+        const args = {
+          connectionId,
+          pathId,
+          method,
+          path: '/signals?route=one%2Ftwo&label=Caf%C3%A9',
+          body,
+        };
+        const details = await discovered.approvalDetails('CONNECTED_HTTP', args);
+        const expected = {
+          method,
+          url: `${path.endpoint}${args.path}`,
+          ...(method === 'GET' ? {} : { body }),
+        };
+        assert.deepEqual(details.request, expected);
+        assert.deepEqual(details.account, {
+          name: 'Synthetic HTTP API',
+          identity: 'Synthetic account',
+        });
+        assert.equal(details.verifiedBinding, await discovered.binding(connectionId));
+        assert.doesNotMatch(JSON.stringify(details), /synthetic-http-context-secret/);
+        assert.equal(calls.length, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].indexOf(method));
+        await discovered.execute(
+          'CONNECTED_HTTP',
+          args,
+          undefined,
+          undefined,
+          details.verifiedBinding,
+        );
+        assert.deepEqual(calls.at(-1), { ...expected, body: method === 'GET' ? undefined : body });
+      }
+      const args = {
+        connectionId,
+        pathId,
+        method: 'POST',
+        path: '/original',
+        body: { label: 'Original record' },
+      };
+      const pending = discovered.approvalDetails('CONNECTED_HTTP', args);
+      args.method = 'DELETE';
+      args.path = '/changed';
+      args.body.label = 'Changed record';
+      const details = await pending;
+      assert.deepEqual(details.request, {
+        method: 'POST',
+        url: `${path.endpoint}/original`,
+        body: { label: 'Original record' },
+      });
+      await pool.query(
+        'UPDATE discovered_connections SET account_id=gen_random_uuid() WHERE id=$1',
+        [connectionId],
+      );
+      await assert.rejects(
+        discovered.execute('CONNECTED_HTTP', args, undefined, undefined, details.verifiedBinding),
+        (cause: Error & { notRun?: boolean }) => {
+          assert.match(cause.message, /connected account changed/);
+          assert.equal(cause.notRun, true);
+          return true;
+        },
+      );
+      const controller = new AbortController();
+      controller.abort(new Error('synthetic_stop'));
+      await assert.rejects(
+        discovered.approvalDetails('CONNECTED_HTTP', args, controller.signal),
+        /synthetic_stop/,
+      );
+      await assert.rejects(
+        discovered.approvalDetails('CONNECTED_HTTP', { ...args, path: '../escape' }),
+        /stay in the saved API address/,
+      );
+      await pool.query('UPDATE discovered_connections SET owner_id=$2 WHERE id=$1', [
+        connectionId,
+        'another-synthetic-owner',
+      ]);
+      await assert.rejects(discovered.approvalDetails('CONNECTED_HTTP', args), /unavailable/);
+      assert.equal(calls.length, 5);
+    } finally {
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    }
+  },
+);
+
+test(
+  'MCP confirmation context keeps the exact catalog, owner and connection binding',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const schema = `test_mcp_context_${randomUUID().replaceAll('-', '')}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = new pg.Pool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: `-c search_path=${schema}`,
+    });
+    try {
+      const owner = 'synthetic-context-owner';
+      const key = randomBytes(32);
+      const grantVault = await createAppGrantVault(pool, {
+        ownerId: owner,
+        keyStore: { id: 'fixture', configured: true, getKey: async () => key },
+      });
+      async function fixture() {
+        const connectionId = randomUUID();
+        const pathId = randomUUID();
+        let endpoint = 'https://context.example.test/mcp';
+        let listFailure = false;
+        let beforeList: (() => Promise<void>) | undefined;
+        let beforeToken:
+          ((client: Parameters<typeof grantVault.read>[1]) => Promise<void>) | undefined;
+        let lists = 0;
+        let calls = 0;
+        const paths = () => [{ id: pathId, kind: 'mcp', endpoint, auth: 'bearer' }];
+        const discovered = await createDiscoveredConnections(pool, {
+          ownerId: owner,
+          baseUrl: 'http://localhost:4310',
+          grantVault: {
+            ...grantVault,
+            read: async (id, client) => {
+              const grant = await grantVault.read(id, client);
+              await beforeToken?.(client);
+              return grant;
+            },
+          },
+          transport: {
+            validateEndpoint: async (value) => value,
+            http: async () => assert.fail('No HTTP request is expected.'),
+            callTool: async () => {
+              calls++;
+              return { content: [{ type: 'text', text: 'Synthetic rows.' }] };
+            },
+            listTools: async (address) => {
+              lists++;
+              await beforeList?.();
+              if (listFailure)
+                throw Object.assign(
+                  new Error('Synthetic catalog is unavailable: synthetic-context-secret'),
+                  { statusCode: 503, code: 'SYNTHETIC_BUSY' },
+                );
+              return {
+                tools: [
+                  {
+                    name: 'read_rows',
+                    description: `Read rows at ${address}. synthetic-context-secret`,
+                    inputSchema: { type: 'object', properties: { tableId: { type: 'string' } } },
+                  },
+                  { name: 'read_rows_status', inputSchema: {} },
+                ],
+              };
+            },
+          },
+          oauth: {} as Parameters<typeof createDiscoveredConnections>[1]['oauth'],
+        });
+        await pool.query(
+          'INSERT INTO discovered_connections(id,owner_id,service,name,account_name,paths) VALUES($1,$2,$3,$4,$5,$6)',
+          [
+            connectionId,
+            owner,
+            'context-fixture',
+            'Synthetic MCP',
+            'Synthetic account',
+            JSON.stringify(paths()),
+          ],
+        );
+        await grantVault.put(connectionId, 'synthetic-context-secret');
+        return {
+          discovered,
+          connectionId,
+          args: { connectionId, pathId, tool: 'read_rows', input: { tableId: 'synthetic-table' } },
+          counts: () => ({ lists, calls }),
+          beforeList: (fn: () => Promise<void>) => {
+            beforeList = fn;
+          },
+          beforeToken: (fn: (client: Parameters<typeof grantVault.read>[1]) => Promise<void>) => {
+            beforeToken = fn;
+          },
+          failList: () => {
+            listFailure = true;
+          },
+          replace: async (client: Parameters<typeof grantVault.read>[1] = pool) => {
+            endpoint = 'https://replacement.example.test/mcp';
+            await client.query(
+              'UPDATE discovered_connections SET paths=$2,account_id=$3 WHERE id=$1',
+              [connectionId, JSON.stringify(paths()), randomUUID()],
+            );
+          },
+          replacePath: async () => {
+            endpoint = 'https://replacement.example.test/mcp';
+            await pool.query('UPDATE discovered_connections SET paths=$2 WHERE id=$1', [
+              connectionId,
+              JSON.stringify(paths()),
+            ]);
+          },
+        };
+      }
+      const refused = (cause: Error & { notRun?: boolean }) => {
+        assert.match(cause.message, /changed/);
+        assert.equal(cause.notRun, true);
+        return true;
+      };
+      await t.test('selects one exact tool and hides the credential', async () => {
+        const f = await fixture();
+        const details = await f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args);
+        assert.ok(details.tool);
+        assert.equal(details.tool.name, 'read_rows');
+        assert.match(details.tool.description!, /context\.example\.test/);
+        assert.equal(JSON.stringify(details).includes('synthetic-context-secret'), false);
+        assert.equal(details.account.identity, 'Synthetic account');
+        assert.equal(details.verifiedBinding, await f.discovered.binding(f.connectionId));
+        for (const args of [
+          { ...f.args, tool: 'READ_ROWS' },
+          { ...f.args, tool: 'read_row' },
+          { ...f.args, pathId: randomUUID() },
+          { ...f.args, connectionId: randomUUID() },
+        ])
+          await assert.rejects(
+            f.discovered.approvalDetails('CONNECTED_MCP_CALL', args),
+            /unavailable/,
+          );
+        await pool.query('UPDATE discovered_connections SET owner_id=$2 WHERE id=$1', [
+          f.connectionId,
+          'another-synthetic-owner',
+        ]);
+        await assert.rejects(
+          f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args),
+          /unavailable/,
+        );
+        assert.deepEqual(f.counts(), { lists: 1, calls: 0 });
+      });
+      await t.test('a replaced endpoint with the same path ID gets its own catalog', async () => {
+        const f = await fixture();
+        const first = await f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args);
+        await f.replacePath();
+        const second = await f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args);
+        assert.ok(second.tool);
+        assert.match(second.tool.description!, /replacement\.example\.test/);
+        assert.notEqual(first.verifiedBinding, second.verifiedBinding);
+        assert.equal(f.counts().lists, 2);
+      });
+      await t.test('failed refreshes do not approve with an expired catalog', async (t) => {
+        const f = await fixture();
+        await f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args);
+        const now = Date.now();
+        t.mock.method(Date, 'now', () => now + 11 * 60_000);
+        f.failList();
+        await assert.rejects(
+          f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args),
+          (cause: Error & { notRun?: boolean }) => {
+            assert.match(cause.message, /status 503; code SYNTHETIC_BUSY/);
+            assert.match(cause.message, /Synthetic catalog is unavailable/);
+            assert.equal(JSON.stringify(cause).includes('synthetic-context-secret'), false);
+            assert.equal(cause.message.includes('synthetic-context-secret'), false);
+            assert.equal(cause.notRun, true);
+            return true;
+          },
+        );
+        await assert.rejects(
+          f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args),
+          (cause: Error & { notRun?: boolean }) => {
+            assert.match(cause.message, /status 503; code SYNTHETIC_BUSY/);
+            assert.match(cause.message, /Synthetic catalog is unavailable/);
+            assert.equal(JSON.stringify(cause).includes('synthetic-context-secret'), false);
+            assert.equal(cause.message.includes('synthetic-context-secret'), false);
+            assert.equal(cause.notRun, true);
+            return true;
+          },
+        );
+        assert.equal(f.counts().lists, 3);
+      });
+      await t.test('a change during catalog loading refuses the context', async () => {
+        const f = await fixture();
+        f.beforeList(f.replace);
+        await assert.rejects(f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args), refused);
+        assert.deepEqual(f.counts(), { lists: 1, calls: 0 });
+      });
+      await t.test('a change during credential loading makes no metadata request', async () => {
+        const f = await fixture();
+        f.beforeToken(f.replace);
+        await assert.rejects(f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args), refused);
+        assert.deepEqual(f.counts(), { lists: 0, calls: 0 });
+      });
+      await t.test('an old approval cannot dispatch through a new connection', async () => {
+        const f = await fixture();
+        const details = await f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args);
+        await f.replace();
+        await assert.rejects(
+          f.discovered.execute(
+            'CONNECTED_MCP_CALL',
+            f.args,
+            undefined,
+            undefined,
+            details.verifiedBinding,
+          ),
+          refused,
+        );
+        assert.equal(f.counts().calls, 0);
+      });
+      await t.test('a change during dispatch credential loading makes no tool call', async () => {
+        const f = await fixture();
+        const details = await f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args);
+        f.beforeToken(f.replace);
+        await assert.rejects(
+          f.discovered.execute(
+            'CONNECTED_MCP_CALL',
+            f.args,
+            undefined,
+            undefined,
+            details.verifiedBinding,
+          ),
+          refused,
+        );
+        assert.equal(f.counts().calls, 0);
+      });
+      await t.test('a new OAuth connection does not join or accept an old refresh', async () => {
+        const connectionId = randomUUID();
+        const path = {
+          id: randomUUID(),
+          kind: 'mcp',
+          endpoint: 'https://old-context.example.test/mcp',
+          auth: 'oauth',
+        };
+        const sibling = { ...path, id: randomUUID() };
+        const replacement = { ...path, endpoint: 'https://new-context.example.test/mcp' };
+        const state = (name: string) => ({
+          redirectUri: 'http://localhost/callback',
+          tokens: {
+            access_token: `synthetic-${name}-access`,
+            refresh_token: `synthetic-${name}-refresh`,
+            token_type: 'Bearer',
+          },
+          expiresAt: 1,
+        });
+        let entered!: () => void;
+        let release!: () => void;
+        const refreshing = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const waiting = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const refreshes: string[] = [];
+        const metadata: string[] = [];
+        const unused = async () => assert.fail('No action is expected.');
+        const discovered = await createDiscoveredConnections(pool, {
+          ownerId: owner,
+          baseUrl: 'http://localhost:4310',
+          grantVault,
+          transport: {
+            validateEndpoint: async (value) => value,
+            http: unused,
+            callTool: unused,
+            listTools: async (endpoint, headers) => {
+              assert.equal(endpoint, replacement.endpoint);
+              assert.equal(headers.Authorization, 'Bearer synthetic-refreshed-new');
+              metadata.push(endpoint);
+              return { tools: [{ name: 'read_rows', inputSchema: {} }] };
+            },
+          },
+          oauth: {
+            begin: unused,
+            finish: unused,
+            refresh: async (endpoint, saved) => {
+              const old = endpoint === path.endpoint;
+              assert.equal(
+                saved.tokens!.refresh_token,
+                state(old ? 'old' : 'new').tokens.refresh_token,
+              );
+              refreshes.push(endpoint);
+              if (old) {
+                entered();
+                await waiting;
+              }
+              return {
+                ...saved,
+                tokens: {
+                  ...saved.tokens!,
+                  access_token: `synthetic-refreshed-${old ? 'old' : 'new'}`,
+                },
+                expiresAt: Date.now() + 3_600_000,
+              };
+            },
+          },
+        });
+        await pool.query(
+          'INSERT INTO discovered_connections(id,owner_id,service,name,account_name,paths) VALUES($1,$2,$3,$4,$5,$6)',
+          [
+            connectionId,
+            owner,
+            'oauth-context',
+            'Synthetic MCP',
+            'Synthetic account',
+            JSON.stringify([path, sibling]),
+          ],
+        );
+        await grantVault.put(connectionId, JSON.stringify(state('old')));
+        const args = { connectionId, pathId: path.id, tool: 'read_rows', input: {} };
+        const old = discovered.approvalDetails('CONNECTED_MCP_CALL', args);
+        const rejected = assert.rejects(old, refused);
+        try {
+          await refreshing;
+          const shared = discovered.approvalDetails('CONNECTED_MCP_CALL', {
+            ...args,
+            pathId: sibling.id,
+          });
+          const sharedRejected = assert.rejects(shared, refused);
+          await delay(10);
+          await transaction(async (client) => {
+            await client.query(
+              'UPDATE discovered_connections SET account_id=gen_random_uuid(),paths=$2 WHERE id=$1',
+              [
+                connectionId,
+                JSON.stringify([replacement, { ...sibling, endpoint: replacement.endpoint }]),
+              ],
+            );
+            await grantVault.put(connectionId, JSON.stringify(state('new')), client);
+          }, pool);
+          const current = discovered.approvalDetails('CONNECTED_MCP_CALL', args);
+          assert.equal(
+            await Promise.race([current.then(() => true), delay(1000).then(() => false)]),
+            true,
+          );
+          release();
+          await Promise.all([rejected, sharedRejected]);
+          assert.equal((await current).tool!.name, 'read_rows');
+          assert.deepEqual(refreshes, [path.endpoint, replacement.endpoint]);
+          assert.deepEqual(metadata, [replacement.endpoint]);
+          assert.equal(
+            JSON.parse((await grantVault.read(connectionId)).value).tokens.access_token,
+            'synthetic-refreshed-new',
+          );
+          assert.equal(
+            (
+              await pool.query(
+                'SELECT reconnect_required FROM discovered_connections WHERE id=$1',
+                [connectionId],
+              )
+            ).rows[0].reconnect_required,
+            false,
+          );
+        } finally {
+          release();
+          await rejected;
+        }
+      });
+      await t.test('Stop refuses a cold or shared lookup after a late response', async () => {
+        for (const shared of [false, true]) {
+          const f = await fixture();
+          let entered!: () => void;
+          let release!: () => void;
+          const started = new Promise<void>((resolve) => {
+            entered = resolve;
+          });
+          const waiting = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          f.beforeList(async () => {
+            entered();
+            await waiting;
+          });
+          const controller = new AbortController();
+          const first = f.discovered.approvalDetails(
+            'CONNECTED_MCP_CALL',
+            f.args,
+            shared ? undefined : controller.signal,
+          );
+          await started;
+          const stopped = shared
+            ? f.discovered.approvalDetails('CONNECTED_MCP_CALL', f.args, controller.signal)
+            : first;
+          const rejected = assert.rejects(stopped, /synthetic_stop/);
+          controller.abort(new Error('synthetic_stop'));
+          release();
+          await rejected;
+          if (shared) assert.equal((await first).tool!.name, 'read_rows');
+          assert.deepEqual(f.counts(), { lists: 1, calls: 0 });
+        }
+      });
+    } finally {
       await pool.end();
       await admin.query(`DROP SCHEMA ${schema} CASCADE`);
       await admin.end();
@@ -11100,6 +11891,50 @@ test('Composio failure envelopes reject with the provider error', async (t) => {
       (error: unknown) => error === requestError,
     );
   }
+  const lookup = t.mock.method(client.getClient().toolRouter.session, 'executeMeta', async () => ({
+    error: null,
+    data: { success: true, tool_schemas: {}, not_found: ['GMAIL_GET_MESSAGE'] },
+  }));
+  assert.equal(await session.offers!('GMAIL_GET_MESSAGE'), false);
+  assert.equal(await session.offers!('GMAIL_SEND_EMAIL'), true);
+  lookup.mock.mockImplementation(
+    async () =>
+      ({
+        error: null,
+        data: { data: { success: true, tool_schemas: {}, not_found: ['GMAIL_GET_MESSAGE'] } },
+      }) as never,
+  );
+  assert.equal(await session.offers!('GMAIL_GET_MESSAGE'), false);
+  lookup.mock.mockImplementation(async () => ({ error: 'unexpected', data: {} }) as never);
+  assert.equal(await session.offers!('GMAIL_GET_MESSAGE'), true);
+  lookup.mock.mockImplementation(async () => {
+    throw APIError.generate(404, { error: 'not_found' }, undefined, new Headers());
+  });
+  assert.equal(await session.offers!('GMAIL_GET_MESSAGE'), false);
+  lookup.mock.mockImplementation(async () => {
+    throw APIError.generate(404, undefined, '<html>missing</html>', new Headers());
+  });
+  await assert.rejects(session.offers!('GMAIL_GET_MESSAGE'));
+  lookup.mock.mockImplementation(async () => {
+    throw APIError.generate(503, { error: 'unavailable' }, undefined, new Headers());
+  });
+  await assert.rejects(session.offers!('GMAIL_GET_MESSAGE'));
+  requestError = APIError.generate(
+    404,
+    { error: 'not_found' },
+    undefined,
+    new Headers({ 'content-type': 'application/json' }),
+  );
+  await assert.rejects(
+    session.execute('GMAIL_GET_MESSAGE', {}, 'fixture-account'),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { status?: number }).status, 404);
+      assert.ok(error.message.includes('GMAIL_GET_MESSAGE'));
+      assert.match(error.message, /HTTP 404.*not_found/);
+      return true;
+    },
+  );
 });
 
 test('Composio catalog and connection requests classify HTTP failures without exposing provider details', async (t) => {
@@ -12268,7 +13103,7 @@ test(
         },
       });
       const request = { task: 'review' as const, instructions: 'Synthetic', input: {} };
-      await assert.rejects(curator.curate(request), /Synthetic usage write failure/);
+      assert.deepEqual(await curator.curate(request), {});
       const failedAt = Date.now();
       await new Promise((resolve) => setTimeout(resolve, 20));
       await assert.rejects(curator.curate(request), /Synthetic usage write failure/);
@@ -13397,6 +14232,106 @@ test('discovered requests identify Nod, follow redirects only to checked public 
   );
 });
 
+test('discovered requests stay open while data arrives and end after ten silent minutes', async (t) => {
+  const { PassThrough } = await import('node:stream');
+  const { EventEmitter } = await import('node:events');
+  t.mock.method(AbortSignal, 'timeout', (ms: number) => {
+    const controller = new AbortController();
+    setTimeout(
+      () =>
+        controller.abort(
+          new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
+        ),
+      ms,
+    );
+    return controller.signal;
+  });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const streams: InstanceType<typeof PassThrough>[] = [];
+  const request = ((
+    url: URL,
+    options: { signal: AbortSignal },
+    callback: (incoming: unknown) => void,
+  ) => {
+    const moved = url.pathname === '/moved';
+    const outbound = Object.assign(new EventEmitter(), { end() {} });
+    const incoming = Object.assign(new PassThrough(), {
+      statusCode: moved ? 307 : 200,
+      headers: moved
+        ? { location: '/' }
+        : {
+            'content-type':
+              url.pathname === '/export' ? 'application/octet-stream' : 'text/event-stream',
+          },
+    });
+    options.signal.addEventListener(
+      'abort',
+      () => outbound.emit('error', new DOMException('The operation was aborted', 'AbortError')),
+      { once: true },
+    );
+    if (url.pathname === '/hang') return outbound;
+    options.signal.addEventListener('abort', () => incoming.destroy(new Error('aborted')), {
+      once: true,
+    });
+    if (!moved) streams.push(incoming);
+    queueMicrotask(() => callback(incoming));
+    return outbound;
+  }) as unknown as NonNullable<Parameters<typeof safeRemoteFetch>[2]>['request'];
+  const validate = async (value: string) => ({ url: new URL(value), address: '93.184.216.34' });
+  const open = async (path: string, accept = 'application/json, text/event-stream') =>
+    (
+      await safeRemoteFetch(
+        `https://mcp.fixture.example${path}`,
+        { method: 'POST', body: '{}', headers: { accept } },
+        { validate, request },
+      )
+    ).body!.getReader();
+  const decoder = new TextDecoder();
+  for (const path of ['/', '/moved']) {
+    const progress = await open(path);
+    const stream = streams.at(-1)!;
+    for (let minute = 0; minute < 20; minute += 5) {
+      stream.write(`event: progress\ndata: ${minute}\n\n`);
+      assert.equal(
+        decoder.decode((await progress.read()).value),
+        `event: progress\ndata: ${minute}\n\n`,
+      );
+      t.mock.timers.tick(5 * 60_000);
+    }
+    stream.end('event: result\n\n');
+    assert.equal(decoder.decode((await progress.read()).value), 'event: result\n\n');
+    assert.equal((await progress.read()).done, true);
+  }
+  const silent = await open('/');
+  t.mock.timers.tick(10 * 60_000);
+  await assert.rejects(silent.read(), /sent nothing for 10 minutes/);
+  const hanging = open('/hang');
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(10 * 60_000);
+  await assert.rejects(hanging, /sent nothing for 10 minutes/);
+  const events = await open('/');
+  const eventStream = streams.at(-1)!;
+  for (let minute = 0; minute < 90; minute += 5) {
+    eventStream.write('event: progress\n\n');
+    await events.read();
+    t.mock.timers.tick(5 * 60_000);
+  }
+  eventStream.end();
+  assert.equal((await events.read()).done, true);
+  for (const [path, accept] of [
+    ['/export', undefined],
+    ['/', 'application/json'],
+  ] as const) {
+    const trickle = await open(path, accept);
+    for (let minute = 0; minute < 60; minute += 5) {
+      streams.at(-1)!.write('x');
+      await trickle.read();
+      t.mock.timers.tick(5 * 60_000);
+    }
+    await assert.rejects(trickle.read(), /did not finish within an hour/);
+  }
+});
+
 test(
   'connection failures expose bounded recovery errors and require a manual retry',
   { skip: !process.env.TEST_DATABASE_URL },
@@ -13475,6 +14410,51 @@ test(
     const prepared = await f.service.prepare(owner, 'GITHUB_LIST_REPOSITORIES', {
       connectionId: connected.connectionId,
     });
+    for (const phase of ['session startup', 'before dispatch', 'after dispatch'])
+      await t.test(`approved action Stop during ${phase} keeps its dispatch outcome`, async () => {
+        const controller = new AbortController();
+        const stop = new Error('Synthetic boundary stop.');
+        const createSession = f.provider.createSession;
+        const execute = f.session.execute;
+        const before = f.executed.length;
+        f.provider.createSession = async (...args) => {
+          const session = await createSession(...args);
+          if (phase === 'session startup') controller.abort(stop);
+          return session;
+        };
+        f.session.execute = async (...args) => {
+          const result = await execute(...args);
+          if (phase === 'after dispatch') {
+            controller.abort(stop);
+            controller.signal.throwIfAborted();
+          }
+          return result;
+        };
+        try {
+          await assert.rejects(
+            f.service.executeApproved(
+              owner,
+              'GITHUB_LIST_REPOSITORIES',
+              prepared,
+              undefined,
+              controller.signal,
+              undefined,
+              async () => {
+                if (phase === 'before dispatch') controller.abort(stop);
+              },
+            ),
+            (error: Error & { notRun?: boolean }) => {
+              assert.match(error.message, /Synthetic boundary stop/);
+              assert.equal(error.notRun === true, phase !== 'after dispatch');
+              return true;
+            },
+          );
+          assert.equal(f.executed.length, before + (phase === 'after dispatch' ? 1 : 0));
+        } finally {
+          f.provider.createSession = createSession;
+          f.session.execute = execute;
+        }
+      });
     const execute = f.session.execute;
     for (const status of [400, 429, 503]) {
       f.session.execute = async () => {
@@ -13496,6 +14476,7 @@ test(
     ]);
     await assert.rejects(f.service.executeApproved(owner, 'GITHUB_LIST_REPOSITORIES', prepared), {
       statusCode: 404,
+      notRun: true,
     });
     await f.pool.query('UPDATE app_connections SET account_active=true WHERE id=$1', [
       connected.connectionId,
@@ -13510,7 +14491,16 @@ test(
     };
     await assert.rejects(f.service.executeApproved(owner, 'GITHUB_LIST_REPOSITORIES', prepared), {
       statusCode: 404,
+      notRun: true,
     });
+    assert.equal(f.executed.length, executions);
+    await f.pool.query('DELETE FROM app_connections WHERE id=$1', [connected.connectionId]);
+    const sessions = f.sessions.length;
+    await assert.rejects(f.service.executeApproved(owner, 'GITHUB_LIST_REPOSITORIES', prepared), {
+      statusCode: 404,
+      notRun: true,
+    });
+    assert.equal(f.sessions.length, sessions);
     assert.equal(f.executed.length, executions);
   },
 );

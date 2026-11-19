@@ -62,6 +62,16 @@ For source installs, `pnpm start` uses the Docker daemon's CPU count when it is 
 
 The self-hosted server reaches Docker through a restricted proxy for its workspace and browser containers. The proxy hands each running command's stream over as a raw connection, so its HTTP time limits don't close commands that run longer. Its Compose configuration allows separate memory limits through `NOD_WORKSPACE_MEMORY` and `NOD_BROWSER_MEMORY`.
 
+## Command permission
+
+Every model-issued Bash command passes the same Trust checker as app and browser actions. The runtime supplies the exact command, its actual folder and its effective time limit, including for delegates and nested calls. It waits behind an earlier app confirmation and checks Stop and application shutdown again before dispatch. The same cancellation signal reaches the command process. A failed check or a command that needs confirmation is refused. No pending shell approval is saved. A command that is allowed still passes the current turn and owner-request checks before it runs.
+
+Generated file helpers and command wrappers use an absolute shell and a fixed path of system programs. Python helpers run `/usr/bin/python3 -I`, so workspace modules and user startup files cannot replace them. Only the checked model command receives the normal path for installed tools. File reads, output capture and cleanup stay in the helper environment.
+
+Successful commands record the Trust basis in Usage. The action target contains no command text or file content. Existing command records keep their separate redaction rules below.
+
+The checker is a model and can make mistakes. Mutable scripts, imports and program settings can have indirect effects. This check does not inspect each network connection or prevent all data transfer. Public internet access remains available.
+
 ## The command supervisor
 
 Every command goes through a small supervisor inside the container, in [`src/providers/docker/command.ts`](https://github.com/n8n-io/nod/blob/main/src/providers/docker/command.ts).
@@ -101,7 +111,7 @@ Pi reads the page from agent-browser's accessibility snapshot, with `@eN` refere
 
 Every browser command has a deadline: 60 seconds, or a wait's own timeout plus 30 seconds. That leaves room for agent-browser's own 30-second limit on each browser call, so only a browser that has stopped answering misses it. A browser that misses its deadline, is interrupted or doesn't close within 5 seconds is killed with all its Chromium processes. A cancelled action requires an explicit open or saved-session selection before that browser can continue. Once cancellation is acknowledged, other sessions keep their browsers and can continue. A lost bridge response still requires recovery of the application namespace because the worker may have closed it. Nod never repeats the interrupted action during recovery. While a dialog is open, the observation is the dialog, and every action except open is refused until Pi accepts or dismisses it.
 
-Profiles stay on the browser container's volume when Nod replaces the container, for example after a restart. Chromium's profile lock from the old container names a host that no longer exists. Before Chromium starts, Nod removes a lock whose `<host>-<pid>` target names another host, so the profile opens again. A lock from the current container, or one Nod can't read, stays. When a browser command exceeds Nod's time limit, Pi sees that fixed reason. Any other failure outside the browser's own errors shows only the generic "The workspace browser could not complete this action. Try again." message.
+Profiles stay on the browser container's volume when Nod replaces the container, for example after a restart. Chromium's profile lock from the old container names a host that no longer exists. Before Chromium starts, Nod removes a lock whose `<host>-<pid>` target names another host, so the profile opens again. A lock from the current container, or one Nod can't read, stays. When the browser fails to start, Pi sees that no page opened and the reason the browser gave, with Nod's internal browser paths removed. When a browser command exceeds Nod's time limit, Pi sees that fixed reason. Any other failure outside the browser's own errors shows only the generic "The workspace browser could not complete this action. Try again." message.
 
 Known secret values (passwords, codes, card numbers and security codes) are removed from tool output and masked in screenshots; usernames and the cardholder name aren't secrets and stay visible. URL parameters that carry credentials, such as tokens and signatures, are hidden; other query parameters stay. When an action fails, Pi sees the browser's own error with known secrets removed. Pi uses saved profiles through `browser_session` and never reads their files. The code is in [`src/providers/agent-browser/`](https://github.com/n8n-io/nod/tree/main/src/providers/agent-browser).
 

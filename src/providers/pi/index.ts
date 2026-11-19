@@ -670,18 +670,28 @@ export function createPiAgent(options: {
         );
       if (input.newRequest && cold) startRequest(manager);
       const sandboxTools = input.restricted ? [] : createSandbox(input.workspace, input.timeZone);
+      const compactTools = [
+        ...sandboxTools.map((tool) => tool.name),
+        'nod_tool_search',
+        ...['apps', 'send_message'].filter((name) =>
+          input.tools.some((tool) => tool.name === name),
+        ),
+      ];
       const tools: ToolDefinition[] = [
         ...sandboxTools.map((definition): ToolDefinition => ({
           ...definition,
           execute: async (id, params, signal, onUpdate, context) => {
+            params = structuredClone(params);
             const result = await input.runTool(
               definition.name,
               params,
-              async () => {
-                const output = await definition.execute(id, params, signal, onUpdate, context);
+              async (operation = signal) => {
+                const callSignal =
+                  operation && signal ? AbortSignal.any([signal, operation]) : operation;
+                const output = await definition.execute(id, params, callSignal, onUpdate, context);
                 const bounded = id.includes('/')
                   ? output
-                  : await boundedOutput(definition.name, async () => output, signal);
+                  : await boundedOutput(definition.name, async () => output, callSignal);
                 if (definition.name !== 'bash') return bounded;
                 const exitCode = (output.structuredContent as { exit_code?: unknown } | undefined)
                   ?.exit_code;
@@ -787,11 +797,7 @@ export function createPiAgent(options: {
                         }),
                         description: tool.description.replaceAll('tool_search', 'nod_tool_search'),
                         execute: async (id, params, signal, update, context) => {
-                          if (budget.compact)
-                            pi.setActiveTools([
-                              ...sandboxTools.map((tool) => tool.name),
-                              'nod_tool_search',
-                            ]);
+                          if (budget.compact) pi.setActiveTools(compactTools);
                           const result = await tool.execute(
                             id,
                             budget.compact
@@ -1082,8 +1088,7 @@ export function createPiAgent(options: {
         sessionManager: manager,
         settingsManager: settings,
       });
-      if (budget.compact)
-        session.setActiveToolsByName([...sandboxTools.map((tool) => tool.name), 'nod_tool_search']);
+      if (budget.compact) session.setActiveToolsByName(compactTools);
       if (disposed) {
         session.dispose();
         throw new Error('The agent service has stopped.');

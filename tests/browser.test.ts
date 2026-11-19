@@ -635,6 +635,81 @@ function result(response: BrowserResponse) {
   return response.ok ? response.result : undefined;
 }
 
+for (const kind of ['login', 'card'] as const)
+  test(`private ${kind} cancellation crosses the browser bridge without a later submission`, async () => {
+    const entered = deferred();
+    const release = deferred();
+    let operationSignal: AbortSignal | undefined;
+    let submissions = 0;
+    const wait = async (signal?: AbortSignal) => {
+      operationSignal = signal;
+      entered.resolve();
+      await release.promise;
+      signal?.throwIfAborted();
+      submissions++;
+    };
+    const fixture = await harness({
+      computer: fakeComputer({
+        injectCredentials: async (_input, signal) => {
+          await wait(signal);
+          return { status: 'submitted' };
+        },
+        fillCard: async (_input, signal) => {
+          await wait(signal);
+        },
+      }),
+    });
+    const computer = fixture.client(`/synthetic/private-${kind}`);
+    const controller = new AbortController();
+    const pending =
+      kind === 'login'
+        ? computer.injectCredentials(
+            {
+              threadId: 'task',
+              origin: 'https://example.com',
+              kind: 'password',
+              password: 'Synthetic bridge password',
+              passwordSelector: '#password',
+              submitSelector: '#submit',
+            },
+            controller.signal,
+          )
+        : computer.fillCard(
+            {
+              threadId: 'task',
+              fields: { number: '#number' },
+              document: 'synthetic-document',
+              destinations: { number: 'https://example.com' },
+              submitSelector: '#submit',
+              card: {
+                cardNumber: '4111111111111111',
+                expiryMonth: 12,
+                expiryYear: 2099,
+                cardholder: 'Synthetic owner',
+              },
+            },
+            controller.signal,
+          );
+    const rejected = assert.rejects(pending, /cancelled/);
+    try {
+      await entered.promise;
+      assert.ok(operationSignal);
+      assert.equal(operationSignal.aborted, false);
+      controller.abort();
+      for (let attempt = 0; !operationSignal.aborted && attempt < 100; attempt++) await delay(10);
+      assert.equal(operationSignal.aborted, true);
+      release.resolve();
+      await rejected;
+      assert.equal(submissions, 0);
+      await assert.rejects(computer.act('task', { action: 'snapshot' }), /unavailable/);
+      assert.ok(await computer.act('task', { action: 'open', url: 'https://example.com/reopen' }));
+    } finally {
+      release.resolve();
+      await rejected;
+      await fixture.close();
+    }
+  });
+
 test('quiesce refuses a pending request without aborting or querying its browser', async () => {
   const entered = deferred();
   const release = deferred();
@@ -945,6 +1020,8 @@ test('a card goes only into the approved fields on the approved sites and stays 
       }
       if (command[0] === 'get' && command[1] === 'url') data = { url };
       if (command[0] === 'get' && command[1] === 'cdp-url') data = { cdpUrl: devtools.url };
+      if (command[0] === 'is' && command[1] === 'enabled')
+        data = { enabled: Boolean(model.frameOf[command[2]!]) };
       if (command[0] === 'get' && command[1] === 'attr')
         data = {
           value: command[3] === 'autocomplete' ? (autocomplete[command[2]!] ?? null) : null,
@@ -1076,6 +1153,25 @@ test('a card goes only into the approved fields on the approved sites and stays 
     await computer.fillCard({ ...entry, ...fresh });
     assert.equal(model.values.get('@e4'), card.cardNumber);
     assert.doesNotMatch((await computer.act('shop', { action: 'snapshot' })).text, /4242/);
+    await computer.act('shop', { action: 'open', url: 'https://1.1.1.1/thanks' });
+    model.selections = {
+      main: [
+        {
+          nodeId: 'selected-card',
+          backendDOMNodeId: 911,
+          role: { value: 'spinbutton' },
+          name: { value: 'Synthetic payment method' },
+          value: { value: Number(card.cardNumber) },
+          properties: [{ name: 'editable', value: { value: 'plaintext' } }],
+        },
+      ],
+      pay: [],
+      ads: [],
+    };
+    const selected = await computer.currentPage('shop');
+    assert.doesNotMatch(JSON.stringify(selected), new RegExp(card.cardNumber));
+    assert.match(selected.currentSelections?.incomplete ?? '', /selected value is hidden/);
+    assert.equal(selected.currentSelections?.values[0]?.value, '[redacted]');
   } finally {
     await computer.dispose();
     await devtools.close();
@@ -1668,6 +1764,47 @@ test('a failed workspace browser action names only Nod-authored reasons', async 
       });
   } finally {
     await fixture.close();
+  }
+});
+
+test('a browser that fails to start reports why through the workspace browser', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-browser-start-failure-'));
+  let failure = (args: string[]) =>
+    `Chrome exited early (exit code: 21) for ${args[args.indexOf('--profile') + 1]} and ${/--disk-cache-dir=([^,]+)/.exec(args.join(' '))?.[1]}`;
+  const fixture = await harness({
+    computer: createAgentBrowserComputer({
+      dataRoot: directory,
+      headless: true,
+      run: async (_executable, args) => ({
+        exitCode: args.includes('info') ? 0 : 1,
+        stderr: '',
+        stdout: JSON.stringify(
+          args.includes('info')
+            ? { success: true, data: { active: false } }
+            : {
+                success: false,
+                error: failure(args),
+              },
+        ),
+      }),
+    }),
+  });
+  try {
+    await assert.rejects(
+      fixture.client(directory).act('fixture', { action: 'open', url: 'https://example.com/' }),
+      {
+        message:
+          'The workspace browser could not start, so no page opened. The browser said: Chrome exited early (exit code: 21) for [browser data] and [browser data]',
+      },
+    );
+    failure = () => 'Navigation failed: net::ERR_NAME_NOT_RESOLVED';
+    await assert.rejects(
+      fixture.client(directory).act('fixture', { action: 'open', url: 'https://example.com/' }),
+      { message: new BrowserActionError('browser_navigation_failed').message },
+    );
+  } finally {
+    await fixture.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -2593,6 +2730,152 @@ test('a password typed through the handoff in several pauses hides only the fini
 });
 
 test(
+  'native browser targets keep their own name before named ancestor context',
+  { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-target-name-native-'));
+    const server = createHttpServer((_request, response) => {
+      response.setHeader('content-type', 'text/html');
+      response.end(`<title>Synthetic target names</title>
+        <style>#blank{position:fixed;left:0;top:0;width:20vw;height:20vh}body{padding-top:25vh}</style>
+        <form aria-label="Named form"><button type="button" id="form-button"></button></form>
+        <section role="region" aria-label="Named region"><button id="blank"></button><input id="field"></section>
+        <button id="named">Named exact button<div id="child"></div></button>
+        <div id="custom" role="treeitem" aria-label="Named custom target" tabindex="0"></div>
+        <form action="/submit" method="post" aria-label="Known form"><input id="known"></form>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const computer = createAgentBrowserComputer({
+      dataRoot: directory,
+      browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+      privateNetwork: true,
+      headless: true,
+    });
+    try {
+      await computer.act('target-name', { action: 'open', url: origin });
+      for (const [selector, ancestor] of [
+        ['#form-button', 'Named form'],
+        ['#blank', 'Named region'],
+        ['#child', 'Named exact button'],
+      ]) {
+        const page = await computer.currentPage('target-name', { action: 'click', selector });
+        assert.equal(page.controls?.[0]?.name, '', selector);
+        assert.ok(
+          page.controls?.slice(1).some(({ name }) => name === ancestor),
+          selector,
+        );
+        assert.match(page.target!, /^[0-9a-f]{64}$/);
+      }
+      for (const step of [
+        { action: 'click', x: 0.05, y: 0.05 },
+        {
+          action: 'click',
+          points: [
+            { x: 0.05, y: 0.05 },
+            { x: 0.05, y: 0.05 },
+          ],
+        },
+      ] satisfies BrowserAction[]) {
+        const page = await computer.currentPage('target-name', step);
+        assert.equal(page.controls?.[0]?.name, '');
+        assert.equal(page.controls?.[1]?.name, 'Named region');
+      }
+      await computer.act('target-name', { action: 'fill', selector: '#field', text: 'synthetic' });
+      for (const step of [
+        { action: 'press', key: 'Enter' },
+        { action: 'type', text: 'synthetic\n' },
+      ] satisfies BrowserAction[]) {
+        const page = await computer.currentPage('target-name', step);
+        assert.deepEqual(page.controls?.[0], { role: 'textbox', name: '' });
+        assert.equal(page.controls?.[1]?.name, 'Named region');
+        assert.equal(page.submits, undefined);
+      }
+      for (const [selector, name] of [
+        ['#named', 'Named exact button'],
+        ['#custom', 'Named custom target'],
+      ]) {
+        const page = await computer.currentPage('target-name', { action: 'click', selector });
+        assert.equal(page.controls?.[0]?.name, name);
+      }
+      await computer.act('target-name', { action: 'fill', selector: '#known', text: 'synthetic' });
+      const known = await computer.currentPage('target-name', { action: 'press', key: 'Enter' });
+      assert.deepEqual(known.controls?.[0], { role: 'textbox', name: '' });
+      assert.equal(known.controls?.[1]?.name, 'Known form');
+      assert.deepEqual(known.submits, { method: 'POST', to: `${origin}/submit` });
+    } finally {
+      await computer.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'native coordinate targets follow normal pointer hit testing',
+  { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-pointer-target-native-'));
+    const requests: string[] = [];
+    const server = createHttpServer((request, response) => {
+      if (request.method === 'POST' || request.url?.startsWith('/overlay')) {
+        requests.push(`${request.method} ${request.url}`);
+        response.writeHead(204).end();
+        return;
+      }
+      const named = request.url === '/named';
+      response.setHeader('content-type', 'text/html');
+      response.end(`<title>Synthetic pointer target</title>
+        <style>button{position:fixed;inset:0;width:100vw;height:100vh;border:0}#overlay{pointer-events:none;opacity:.2}</style>
+        <form method="post" action="/actual-${named ? 'named' : 'blank'}"><button${named ? ' aria-label="Named actual target"' : ''}></button></form>
+        <form method="get" action="/overlay"><button id="overlay" aria-label="Named overlay">Named overlay</button></form>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const computer = createAgentBrowserComputer({
+      dataRoot: directory,
+      browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+      privateNetwork: true,
+      headless: true,
+    });
+    try {
+      const expected: string[] = [];
+      for (const named of [false, true]) {
+        await computer.act('pointer-target', {
+          action: 'open',
+          url: `http://127.0.0.1:${address.port}/${named ? 'named' : 'blank'}`,
+        });
+        const step: BrowserAction = { action: 'click', x: 0.5, y: 0.5 };
+        const page = await computer.currentPage('pointer-target', step);
+        assert.ok(page.target);
+        assert.deepEqual(page.controls?.[0], {
+          role: 'button',
+          name: named ? 'Named actual target' : '',
+        });
+        assert.deepEqual(page.submits, {
+          method: 'POST',
+          to: `http://127.0.0.1:${address.port}/actual-${named ? 'named' : 'blank'}`,
+        });
+        assert.deepEqual(requests, expected);
+        await computer.act('pointer-target', { ...step, expectTarget: page.target });
+        expected.push(`POST /actual-${named ? 'named' : 'blank'}`);
+        for (let i = 0; i < 500 && requests.length < expected.length; i++) await delay(10);
+        assert.deepEqual(requests, expected);
+      }
+    } finally {
+      await computer.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   'native secure entry completes single and split OTP controls without maxlength hints',
   { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
   async () => {
@@ -2818,6 +3101,16 @@ test('rich feedback redaction handles embedded JSON, identifying addresses, enco
     'Open "https://tenant.example.test/Personal%20Notes/log.txt" failed with HTTP 412.',
     'Rejected fixture%2fsecret-token and marta.vidal%40example.test.',
     'External record 00000000-1111-4222-8333-444444444444 was not found.',
+    '/media/private-owner/BACKUP/Medical Notes/scan.pdf does not exist.',
+    '/run/media/private-owner/USB/Tax Return/form.pdf does not exist.',
+    'Book a slot at calendly.com/synthetic-booker/30min please.',
+    'Profile www.example.com/in/synthetic-profile?ref=private-ref#private-anchor failed.',
+    'Redirect via unlisted.notatld/next?to=example.com/synthetic-hidden failed.',
+    'Mirror downloads.example.com:8443/synthetic-mirror?key=synthetic-query failed.',
+    'Open example.com/Private%20Records/Tax%20Return.pdf failed with HTTP 413.',
+    'Open example%2Ecom%2FReport%09synthetic-tab-record.pdf failed with HTTP 414.',
+    'Open example.com:8443/private?label=Case%20synthetic-query-record failed with HTTP 415.',
+    'Open example.com./private#Case%0Asynthetic-fragment-record failed with HTTP 416.',
     { type: 'image', data: 'synthetic-private-image' },
     {
       content: [
@@ -2864,6 +3157,20 @@ test('rich feedback redaction handles embedded JSON, identifying addresses, enco
     'Client Records',
     'Design Review',
     'Private Files',
+    'Medical Notes',
+    'Tax Return',
+    'BACKUP',
+    'synthetic-booker',
+    '30min',
+    'synthetic-profile',
+    'private-ref',
+    'private-anchor',
+    'synthetic-hidden',
+    'synthetic-mirror',
+    'synthetic-query',
+    'synthetic-tab-record',
+    'synthetic-query-record',
+    'synthetic-fragment-record',
     'fixture',
     'marta.vidal',
     '00000000-1111',
@@ -2895,8 +3202,24 @@ test('rich feedback redaction handles embedded JSON, identifying addresses, enco
     'HTTP 410',
     'HTTP 411',
     'HTTP 412',
+    'HTTP 413',
+    'HTTP 414',
+    'HTTP 415',
+    'HTTP 416',
+    'Book a slot at [url] please',
   ])
     assert.ok(encoded.includes(useful), useful);
+  const { timeZoneRegion } = await import('../src/shared/date-locale.ts');
+  const local = createFeedbackRedactor({
+    secrets: [],
+    profile: { names: [], region: timeZoneRegion('America/Los_Angeles') ?? undefined },
+  }).text('Call the clinic at (415) 555-0134 today.');
+  assert.ok(!local.includes('555-0134'), local);
+  assert.ok(local.includes('Call the clinic'), local);
+  const chained = createFeedbackRedactor({ secrets: [], profile: { names: [] } }).text(
+    `${'a.zz/'.repeat(6000)} then example.com:8443 and example.com./synthetic-chained?q=1 at example.com.`,
+  );
+  assert.ok(chained.endsWith(' then [host] and [url] at [host].'), chained.slice(-60));
   const concealedType = createFeedbackRedactor({ secrets: ['image'], profile: { names: [] } });
   assert.ok(
     !JSON.stringify(concealedType.value({ type: 'image', data: 'c3ludGhldGljIGltYWdl' })).includes(
@@ -4640,6 +4963,74 @@ test('composer preserves keyboard shortcuts, upload retries, previews and failed
         assert.equal(sends.at(-1).text, '**bold\\*star** next *literal*');
         const richVisible = await assertVisiblePaste(sends.at(-1), 'bold*star next *literal*');
         assert.equal(richVisible.querySelector('strong')?.textContent, 'bold*star');
+        for (const draft of [
+          'See \\![docs](https://example.test/docs)',
+          'See \\\\[docs](https://example.test/docs)',
+          'See \\\\**docs**',
+          'See \\\\<u>docs</u>',
+          'a\\~~~x~~ ~~y~~\\~b',
+          'a\\**x* *y*\\*b',
+          'a\\***x**\\*b',
+          '\\*\\**x*',
+          '\\*!\\**x*',
+          '\\~a\nb *x*\\~',
+          '\\*Y\\* \\**Y*\\*',
+          'y'.repeat(5000) + '\n\\\u0060a \u0060x\u0060',
+          '\\\u0060a \u0060x\u0060',
+          'a\\\u0060\u0060x\u0060\\\u0060b',
+          '| a          |\n| ---------- |\n| b\\\\\\\\<br>c |',
+          '&#x61;~~<u>x</u>~~&#x61;',
+          '\\<!a **Q1**',
+        ]) {
+          await act(async () => replaceText(draft));
+          await submit();
+          assert.deepEqual(parseComposerMarkdown(sends.at(-1).text), parseComposerMarkdown(draft));
+        }
+        for (const [draft, sent] of [
+          ['# \u0060\u0060\u0060a *x* *', '# \u0060\u0060\u0060a *x* *'],
+          ['**Note:**&#x73;ee_it', '**Note:**&#x73;ee_it'],
+          ['\\#tag a*b\nc **Q1**\n========', '#tag a*b\nc **Q1**\n========'],
+        ]) {
+          await act(async () => replaceText(draft));
+          await submit();
+          assert.equal(sends.at(-1).text.trimEnd(), sent);
+        }
+        const { Editor } = await import('@tiptap/core');
+        const { createComposerExtensions } = await import('./src/web/lib/composer-editor.ts');
+        const { composerMarkdown } = await import('./src/web/lib/composer-markdown.ts');
+        const serializer = new Editor({ extensions: createComposerExtensions({ submit() {}, upload() {} }) });
+        for (const [address, href] of [
+          ['https://example.test', 'https://example.test'],
+          ['ada@example.test', 'mailto:ada@example.test'],
+          ['www.example.test', 'http://www.example.test'],
+        ]) {
+          serializer.commands.setContent({
+            type: 'doc',
+            content: [{ type: 'paragraph', content: [
+              { type: 'text', text: 'see ' + address },
+              { type: 'text', text: '(x)', marks: [{ type: 'strike' }] },
+            ] }],
+          });
+          const nodes = parseComposerMarkdown(composerMarkdown(serializer.state.doc)).content[0].content;
+          assert.deepEqual(
+            nodes.map((node) => [node.text, node.marks?.map((mark) => mark.attrs?.href ?? mark.type)]),
+            [['see ', undefined], [address, [href]], ['(x)', ['strike']]],
+          );
+        }
+        serializer.commands.setContent({
+          type: 'doc',
+          content: [{ type: 'paragraph', content: [
+            { type: 'text', text: 'see \\https://example.test' },
+            { type: 'text', text: '(x)', marks: [{ type: 'strike' }] },
+          ] }],
+        });
+        assert.deepEqual(
+          parseComposerMarkdown(composerMarkdown(serializer.state.doc)).content[0].content.map((node) => [
+            node.text,
+            node.marks?.map((mark) => mark.attrs?.href ?? mark.type),
+          ]),
+          [['see \\', undefined], ['https://example.test', ['https://example.test']], ['(x)', ['strike']]],
+        );
         await act(async () => replaceText('| label | value |\n| --- | --- |\n| first | second |'));
         await pasteAtEnd('table tr:last-child td:first-child p', 'A|B\\|C\nD');
         await submit();
@@ -5919,12 +6310,15 @@ test('failed private entry holds every Pi action until the filled document chang
   const directory = await mkdtemp(join(tmpdir(), 'nod-private-cleanup-'));
   const fixture = stagedLoginBrowser();
   let failSubmit = true;
+  let failedSubmissions = 0;
   const computer = createBrowserFixture({
     dataRoot: directory,
     run: async (...args) => {
       const command = args[1].slice(args[1].indexOf('--idle-timeout') + 2);
-      if (command[0] === 'click' && failSubmit)
+      if (command[0] === 'click' && failSubmit) {
+        failedSubmissions++;
         return { stdout: '{"success":false}', stderr: '', exitCode: 1 };
+      }
       return fixture.run(...args);
     },
   });
@@ -5940,6 +6334,7 @@ test('failed private entry holds every Pi action until the filled document chang
         submitSelector: 'button',
       }),
     );
+    assert.equal(failedSubmissions, 1);
     const before = fixture.pages.get('private')!.entered.length;
     for (const input of [
       { action: 'snapshot' as const },
@@ -6214,10 +6609,33 @@ test(
         to: `${origin}/reserve`,
       });
       await computer.act('submits', { action: 'fill', selector: 'input[name=q]', text: 'tables' });
-      assert.deepEqual(await submits({ action: 'press', key: 'Enter' }), {
-        method: 'GET',
-        to: `${origin}/search`,
-      });
+      for (const key of [
+        'Enter',
+        'Return',
+        'Shift+Enter',
+        'Enter+Shift',
+        'Ctrl+Enter+Meta',
+        'NumpadEnter',
+        '\r',
+        '\n',
+      ]) {
+        assert.deepEqual(
+          await submits({ action: 'press', key }),
+          {
+            method: 'GET',
+            to: `${origin}/search`,
+          },
+          key,
+        );
+      }
+      for (const key of [
+        'Enter+Unknown',
+        ' Enter ',
+        'ControlOrMeta+Enter',
+        'Enter\n',
+        'ShiftLeft+Enter',
+      ])
+        assert.equal(await submits({ action: 'press', key }), undefined, key);
       await computer.act('submits', {
         action: 'evaluate',
         script: "document.querySelector('form button').focus()",
@@ -6270,6 +6688,453 @@ test(
         (error) => error instanceof BrowserActionError && error.code === 'browser_target_changed',
       );
       assert.deepEqual(sent, []);
+    } finally {
+      await computer.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test('selection state and replay bindings cross the browser worker for clicks and uploads', async () => {
+  const binding = '1'.repeat(64);
+  const values = [{ role: 'checkbox', name: 'Include vacancies', checked: 'false' as const }];
+  const seen: unknown[] = [];
+  const fixture = await harness({
+    computer: {
+      ...fakeComputer(),
+      currentPage: async () => ({
+        origin: 'https://reports.example.test',
+        url: 'https://reports.example.test/',
+        currentSelections: { binding, values },
+      }),
+      act: async (_id, input) => {
+        seen.push(input);
+        return { text: 'Synthetic click', url: 'https://reports.example.test/' };
+      },
+      upload: async (_id, input) => {
+        seen.push(input);
+        return { text: 'Synthetic upload', url: 'https://reports.example.test/' };
+      },
+    },
+  });
+  try {
+    const client = fixture.client('/synthetic/selection-binding');
+    assert.deepEqual((await client.currentPage('task')).currentSelections, { binding, values });
+    await client.act('task', { action: 'click', selector: '#report', expectSelections: binding });
+    await client.upload('task', {
+      selector: '#file',
+      name: 'synthetic.txt',
+      bytes: Buffer.from('synthetic'),
+      expectSelections: binding,
+    });
+    assert.equal(seen.length, 2);
+    for (const input of seen) assert.equal((input as BrowserAction).expectSelections, binding);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('native selection trees keep false, mixed and empty states and reject incomplete values', async () => {
+  const node = (
+    id: number,
+    role: string,
+    value?: unknown,
+    properties: Record<string, unknown> = {},
+    parentId?: number,
+  ) => ({
+    nodeId: String(id),
+    backendDOMNodeId: id,
+    ...(parentId ? { parentId: String(parentId) } : {}),
+    role: { value: role },
+    name: { value: `Synthetic ${id}` },
+    ...(value === undefined ? {} : { value: { value } }),
+    properties: Object.entries(properties).map(([name, value]) => ({ name, value: { value } })),
+  });
+  const model: DevtoolsModel = {
+    document: 'selection-document',
+    frames: [{ id: 'main', session: 'page', origin: 'https://reports.example.test' }],
+    frameOf: {},
+    values: new Map(),
+    selections: {
+      main: [
+        node(1, 'spinbutton', 0),
+        node(2, 'checkbox', undefined, { checked: 'false' }),
+        node(3, 'checkbox', undefined, { checked: 'mixed' }),
+        node(4, 'listbox'),
+        node(5, 'option', undefined, { selected: false }, 4),
+        node(6, 'textbox', 'Synthetic private text'),
+        node(7, 'combobox', 'Synthetic editable text', { editable: 'plaintext' }),
+      ],
+    },
+  };
+  const fixture = await fakeDevtools(model);
+  const inspector = await openDevtools(fixture.url, 'fixture-target');
+  try {
+    const [frame] = await inspector.selections();
+    assert.ok(frame);
+    assert.equal(frame.document, model.document);
+    assert.deepEqual(
+      frame.values.map(({ role, value, checked, selectedCount }) => ({
+        role,
+        value,
+        checked,
+        selectedCount,
+      })),
+      [
+        { role: 'spinbutton', value: '0', checked: undefined, selectedCount: undefined },
+        { role: 'checkbox', value: undefined, checked: 'false', selectedCount: undefined },
+        { role: 'checkbox', value: undefined, checked: 'mixed', selectedCount: undefined },
+        { role: 'listbox', value: undefined, checked: undefined, selectedCount: 0 },
+      ],
+    );
+    assert.doesNotMatch(JSON.stringify(frame), /Synthetic private text|Synthetic editable text/);
+    model.selections!.main = [node(1, 'combobox')];
+    await assert.rejects(inspector.selections(), /did not report a current value/);
+    model.selections!.main = [node(1, 'slider')];
+    await assert.rejects(inspector.selections(), /did not report a current value/);
+    model.selections!.main = [node(1, 'checkbox')];
+    await assert.rejects(inspector.selections(), /did not report a current checked state/);
+    model.selections!.main = Array.from({ length: 257 }, (_, id) =>
+      node(id, 'checkbox', undefined, { checked: false }),
+    );
+    await assert.rejects(inspector.selections(), /more than 256/);
+    model.selections!.main = [node(1, 'combobox', 'x'.repeat(64_001))];
+    await assert.rejects(inspector.selections(), /exceed 64000/);
+    model.selectionError = 'Synthetic native capture failure';
+    await assert.rejects(inspector.selections(), /Synthetic native capture failure/);
+  } finally {
+    inspector.close();
+    await fixture.close();
+  }
+});
+
+test(
+  'selection capture stops promptly, bounds public values and closes a stalled inspector',
+  { timeout: 15_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-selection-capture-'));
+    const model: DevtoolsModel = {
+      document: 'selection-document',
+      frames: [{ id: 'main', session: 'page', origin: 'https://1.1.1.1' }],
+      frameOf: {},
+      values: new Map(),
+      selections: { main: [] },
+    };
+    const fixture = await fakeDevtools(model);
+    const computer = createBrowserFixture({
+      dataRoot: directory,
+      run: async (_executable, args) => {
+        const command = args.slice(args.indexOf('--idle-timeout') + 2);
+        const data: Record<string, unknown> =
+          command[0] === 'get' && command[1] === 'url'
+            ? { url: 'https://1.1.1.1/' }
+            : command[0] === 'get' && command[1] === 'cdp-url'
+              ? { cdpUrl: fixture.url }
+              : command[0] === 'snapshot'
+                ? { snapshot: '- button "Generate report" [ref=e1]' }
+                : {};
+        if (command[0] === 'screenshot') await writeFile(command[1]!, 'synthetic screen');
+        return { stdout: JSON.stringify({ success: true, data }), stderr: '', exitCode: 0 };
+      },
+    });
+    try {
+      await computer.act('selection', { action: 'open', url: 'https://1.1.1.1/' });
+      const selection = (value: string) => ({
+        nodeId: '1',
+        backendDOMNodeId: 1,
+        role: { value: 'combobox' },
+        name: { value: 'Company' },
+        value: { value },
+      });
+      model.selections!.main = [selection('x'.repeat(301))];
+      const first = await computer.currentPage('selection');
+      assert.match(first.currentSelections?.incomplete ?? '', /description limit/);
+      assert.equal(first.currentSelections?.values[0]?.value?.length, 300);
+      model.selections!.main = [selection('x'.repeat(300) + 'y')];
+      const changed = await computer.currentPage('selection');
+      assert.deepEqual(changed.currentSelections?.values, first.currentSelections?.values);
+      assert.notEqual(changed.currentSelections?.binding, first.currentSelections?.binding);
+      model.holdSelections = true;
+      const entered = deferred();
+      model.onSelections = () => entered.resolve();
+      const controller = new AbortController();
+      const stopped = computer.currentPage('selection', undefined, controller.signal);
+      const rejected = assert.rejects(stopped, /Synthetic selection stop/);
+      await entered.promise;
+      const at = Date.now();
+      controller.abort(new Error('Synthetic selection stop'));
+      await rejected;
+      assert.ok(Date.now() - at < 1000, 'Stop must not wait for the inspector deadline.');
+      for (let attempt = 0; fixture.connections() && attempt < 50; attempt++) await delay(10);
+      assert.equal(fixture.connections(), 0);
+      const timed = await computer.currentPage('selection');
+      assert.equal(timed.currentSelections?.binding, undefined);
+      assert.match(
+        timed.currentSelections?.incomplete ?? '',
+        /could not be read.*tim(e|ed)\s?out/i,
+      );
+      for (let attempt = 0; fixture.connections() && attempt < 50; attempt++) await delay(10);
+      assert.equal(fixture.connections(), 0);
+    } finally {
+      await computer.dispose();
+      await fixture.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'native browser confirmations bind selected company and period without changing the action identity',
+  { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 90_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-selection-native-'));
+    const server = createHttpServer((request, response) => {
+      response.setHeader('content-type', 'text/html');
+      if (request.url === '/frame') {
+        response.end(
+          '<label>Department<select id="department"><option selected>One</option><option>Two</option></select></label>',
+        );
+        return;
+      }
+      if (request.url?.startsWith('/remote-frame')) {
+        response.end(
+          `<label>Branch<select><option selected>${request.url.includes('South') ? 'South' : 'North'}</option></select></label>`,
+        );
+        return;
+      }
+      response.end(`<form onsubmit="event.preventDefault();window.syntheticReports=(window.syntheticReports||[]).concat(this.elements.month.value);window.syntheticThresholds=(window.syntheticThresholds||[]).concat(this.elements.threshold.value)">
+        <label>Company<select name="company"><option>A</option><option selected>B</option></select></label>
+        <label>Month<select name="month" id="month"><option>October</option><option selected>November</option></select></label>
+        <label>Year<select name="year"><option>2025</option><option selected>2026</option></select></label>
+        <label>Threshold<input id="threshold" name="threshold" type="range" min="0" max="100" value="10"></label><label>Copies<input type="number" value="0"></label><label>Include vacancies<input type="checkbox"></label>
+        <div id="numeric-period" role="spinbutton" aria-label="Numeric period" aria-valuenow="11" aria-valuetext="Reporting month" tabindex="0"></div>
+        <input aria-label="Private free text" value="Synthetic free text"><input type="password" value="Synthetic password">
+        <button id="report">Generate report</button></form><iframe src="/frame" title="Synthetic department"></iframe>
+        <iframe id="remote-frame" src="${origin.replace('127.0.0.1', 'localhost')}/remote-frame?North" title="Synthetic branch"></iframe><button id="dialog" onclick="window.syntheticDialogAccepted=confirm('Generate the selected report?')">Confirm report</button>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    let changeFormDuringCapture = false;
+    const computer = createAgentBrowserComputer({
+      dataRoot: directory,
+      browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+      privateNetwork: true,
+      headless: true,
+      daemonCommand: async (path, command, signal, timeoutMs, maxBytes) => {
+        if (changeFormDuringCapture && command.action === 'cdp_url' && signal) {
+          changeFormDuringCapture = false;
+          await existingDaemonCommand(
+            path,
+            {
+              action: 'evaluate',
+              script: "document.querySelector('form').action='/changed-report'",
+            },
+            signal,
+          );
+        }
+        return existingDaemonCommand(path, command, signal, timeoutMs, maxBytes);
+      },
+    });
+    try {
+      for (const kind of ['css', 'ref']) {
+        const snapshot = await computer.act('selection', { action: 'open', url: origin });
+        const ref = /button "Generate report" \[ref=(e\d+)\]/.exec(snapshot.text)?.[1];
+        assert.ok(ref);
+        const step = { action: 'click', selector: kind === 'ref' ? `@${ref}` : '#report' } as const;
+        const before = await computer.currentPage('selection', step);
+        assert.ok(before.currentSelections?.binding, before.currentSelections?.incomplete);
+        assert.equal(before.currentSelections.incomplete, undefined);
+        assert.equal(
+          (await computer.currentPage('selection', step)).currentSelections?.binding,
+          before.currentSelections.binding,
+        );
+        const values = before.currentSelections.values;
+        for (const [name, value] of [
+          ['Company', 'B'],
+          ['Month', 'November'],
+          ['Year', '2026'],
+          ['Copies', '0'],
+        ])
+          assert.ok(
+            values.some((item) => item.name === name && item.value === value),
+            `${name} must have its current value.`,
+          );
+        assert.ok(
+          values.some((item) => item.name === 'Include vacancies' && item.checked === 'false'),
+        );
+        assert.ok(values.some((item) => item.name === 'Department' && item.value === 'One'));
+        assert.ok(
+          values.some(
+            (item) => item.role === 'slider' && item.name === 'Threshold' && item.value === '10',
+          ),
+        );
+        assert.ok(values.some((item) => item.name === 'Branch' && item.value === 'North'));
+        assert.doesNotMatch(
+          JSON.stringify(values),
+          /Synthetic free text|Synthetic password|backendDOMNodeId|nativeValue|valueText|"node"|"parent"/,
+        );
+        await computer.act('selection', {
+          ...step,
+          expectTarget: before.target,
+          expectSelections: before.currentSelections.binding,
+        });
+        await computer.act('selection', { action: 'select', selector: '#month', text: 'October' });
+        const changed = await computer.currentPage('selection', step);
+        assert.equal(changed.target, before.target);
+        assert.notEqual(changed.currentSelections?.binding, before.currentSelections.binding);
+        await assert.rejects(
+          computer.act('selection', {
+            ...step,
+            expectTarget: before.target,
+            expectSelections: before.currentSelections.binding,
+          }),
+          (error) => error instanceof BrowserActionError && error.code === 'browser_target_changed',
+        );
+        const reports = await computer.act('selection', {
+          action: 'evaluate',
+          script: 'window.syntheticReports',
+          readOnly: true,
+        });
+        assert.deepEqual(JSON.parse(reports.text.slice(reports.text.indexOf('\n') + 1)), [
+          'November',
+        ]);
+        await computer.act('selection', {
+          action: 'evaluate',
+          script:
+            "document.querySelector('iframe').contentDocument.querySelector('select').value='Two'",
+        });
+        const frameChanged = await computer.currentPage('selection', step);
+        assert.notEqual(
+          frameChanged.currentSelections?.binding,
+          changed.currentSelections?.binding,
+        );
+        assert.equal(frameChanged.target, before.target);
+        await computer.act('selection', {
+          action: 'evaluate',
+          script:
+            "document.querySelector('#remote-frame').src=document.querySelector('#remote-frame').src.replace('North','South')",
+        });
+        const remoteChanged = await computer.currentPage('selection', step);
+        assert.equal(remoteChanged.currentSelections?.incomplete, undefined);
+        assert.ok(
+          remoteChanged.currentSelections?.values.some(
+            (item) => item.name === 'Branch' && item.value === 'South',
+          ),
+        );
+        assert.notEqual(
+          remoteChanged.currentSelections?.binding,
+          frameChanged.currentSelections?.binding,
+        );
+        assert.equal(remoteChanged.target, before.target);
+        await computer.act('selection', {
+          action: 'evaluate',
+          script: "document.querySelector('#numeric-period').setAttribute('aria-valuenow','10')",
+        });
+        const numericChanged = await computer.currentPage('selection', step);
+        assert.deepEqual(
+          numericChanged.currentSelections?.values,
+          remoteChanged.currentSelections?.values,
+        );
+        assert.notEqual(
+          numericChanged.currentSelections?.binding,
+          remoteChanged.currentSelections?.binding,
+        );
+        await assert.rejects(
+          computer.act('selection', {
+            ...step,
+            expectTarget: remoteChanged.target,
+            expectSelections: remoteChanged.currentSelections?.binding,
+          }),
+          (error) => error instanceof BrowserActionError && error.code === 'browser_target_changed',
+        );
+        await computer.act('selection', {
+          action: 'evaluate',
+          script: "document.querySelector('#threshold').value='20'",
+        });
+        const rangeChanged = await computer.currentPage('selection', step);
+        assert.equal(rangeChanged.target, numericChanged.target);
+        assert.notEqual(
+          rangeChanged.currentSelections?.binding,
+          numericChanged.currentSelections?.binding,
+        );
+        await assert.rejects(
+          computer.act('selection', {
+            ...step,
+            expectTarget: numericChanged.target,
+            expectSelections: numericChanged.currentSelections?.binding,
+          }),
+          (error) => error instanceof BrowserActionError && error.code === 'browser_target_changed',
+        );
+        changeFormDuringCapture = true;
+        await assert.rejects(
+          computer.act('selection', {
+            ...step,
+            expectTarget: rangeChanged.target,
+            expectSelections: rangeChanged.currentSelections?.binding,
+          }),
+          (error) => error instanceof BrowserActionError && error.code === 'browser_target_changed',
+        );
+        assert.equal(changeFormDuringCapture, false);
+        const final = await computer.act('selection', {
+          action: 'evaluate',
+          script: 'window.syntheticReports',
+          readOnly: true,
+        });
+        assert.deepEqual(JSON.parse(final.text.slice(final.text.indexOf('\n') + 1)), ['November']);
+        const thresholds = await computer.act('selection', {
+          action: 'evaluate',
+          script: 'window.syntheticThresholds',
+          readOnly: true,
+        });
+        assert.deepEqual(JSON.parse(thresholds.text.slice(thresholds.text.indexOf('\n') + 1)), [
+          '10',
+        ]);
+      }
+      await computer.act('selection', { action: 'click', selector: '#dialog' });
+      const modalAt = Date.now();
+      const modal = await computer.currentPage('selection', { action: 'accept_dialog' });
+      assert.ok(
+        Date.now() - modalAt < 1500,
+        'An open dialog must not wait for a blocked accessibility read.',
+      );
+      assert.equal(modal.currentSelections?.binding, undefined);
+      assert.match(modal.currentSelections?.incomplete ?? '', /JavaScript dialog is open/);
+      await computer.act('selection', {
+        action: 'accept_dialog',
+        expectOrigin: modal.origin,
+        expectUrl: modal.url,
+        expectTarget: modal.target,
+      });
+      const accepted = await computer.act('selection', {
+        action: 'evaluate',
+        script: 'window.syntheticDialogAccepted',
+        readOnly: true,
+      });
+      assert.equal(JSON.parse(accepted.text.slice(accepted.text.indexOf('\n') + 1)), true);
+      const step = { action: 'click', selector: '#report' } as const;
+      const saved = await computer.currentPage('selection', step);
+      const restarted = createAgentBrowserComputer({
+        dataRoot: directory,
+        browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+        privateNetwork: true,
+        headless: true,
+      });
+      try {
+        const restored = await restarted.currentPage('selection', step);
+        assert.deepEqual(restored.currentSelections?.values, saved.currentSelections?.values);
+        assert.notEqual(restored.currentSelections?.binding, saved.currentSelections?.binding);
+        await assert.rejects(
+          restarted.act('selection', {
+            ...step,
+            expectSelections: saved.currentSelections?.binding,
+          }),
+          (error) => error instanceof BrowserActionError && error.code === 'browser_target_changed',
+        );
+      } finally {
+        await restarted.dispose();
+      }
     } finally {
       await computer.dispose();
       server.closeAllConnections();
@@ -6416,6 +7281,29 @@ test('chat retires reply targets without losing drafts or duplicating ambiguous 
         assert.equal(requests[3].text, draft);
         assert.ok(document.querySelector('[data-message-id="' + committed.clientMessageId + '"]'));
         assert.equal(document.querySelector('[role="alert"]'), null);
+        await act(async () => root.unmount());
+        committed = null;
+        saveDraft(null);
+        state = { ...state, hiddenMessageIds: [], messages };
+        root = createRoot(document.getElementById('root'));
+        await render();
+        await settle(hasDraft);
+        await reply(ids[0]);
+        await submit();
+        await settle(() => requests.length === 5);
+        await act(async () => releases.at(-1).reject(new TypeError('Synthetic ordinary reply response lost')));
+        await settle(() => hasDraft() && document.querySelector('.composer-reply'));
+        state = { ...state, messages: [], chatClearedAt: '2026-10-26T12:02:00.000000Z' };
+        await render();
+        await settle(() => hasDraft() && !document.querySelector('.composer-reply'));
+        await submit();
+        await settle(() => requests.length === 6);
+        assert.equal(requests[5].replyToMessageId, undefined);
+        assert.notEqual(requests[5].clientMessageId, requests[4].clientMessageId);
+        assert.equal(requests[5].chatClearedAt, state.chatClearedAt);
+        await act(async () => releases.at(-1).resolve(Response.json({
+          messageId: requests[5].clientMessageId, turnId: 'synthetic-fresh-chat-turn',
+        })));
       } finally {
         await act(async () => root.unmount());
         dom.window.close();
@@ -6606,7 +7494,8 @@ test('chat reloads older history after hidden confirmations exceed the ID window
         await settle(() => hasDraft() && !document.querySelector('.composer-reply'));
         assert.equal(JSON.parse(localStorage.getItem(draftKey)).reply, null);
         await submit();
-        await settle(() => document.querySelector('[role="alert"]')?.textContent.includes('may have been sent'));
+        await settle(() => hasDraft() &&
+          document.querySelector('[role="alert"]')?.textContent.includes('may have been sent'));
         assert.equal(sends.length, 2);
         assert.ok(hasDraft());
         await submit();
@@ -7005,11 +7894,11 @@ test('chat shows pending sends and active work before a model step', async () =>
         assert.ok(!document.querySelector('.thinking').textContent.includes('**'));
         assert.ok(!document.querySelector('.thinking').textContent.includes('hotel'));
         const history = document.querySelector('.thinking details');
-        assert.equal(history.open, true);
+        assert.equal(history.open, false);
         assert.deepEqual(Array.from(history.querySelectorAll('ol > li'), entry => entry.textContent), ['Read the synthetic report']);
         assert.equal(document.querySelector('[role="status"] [role="status"]'), null);
         await act(async () => history.querySelector('summary').click());
-        await settle(() => !history.open);
+        await settle(() => history.open);
         await render({ streams: { 'synthetic-stream': 'Synthetic partial result' } });
         assert.equal(document.querySelector('.thinking').hidden, true);
         assert.equal(document.querySelector('.thinking details'), history);
@@ -7017,11 +7906,11 @@ test('chat shows pending sends and active work before a model step', async () =>
         await render();
         assert.equal(document.querySelector('.thinking').hidden, false);
         assert.equal(document.querySelector('.thinking details'), history);
-        assert.equal(history.open, false);
+        assert.equal(history.open, true);
         assert.equal(document.querySelector('.thinking .live-line-current').textContent, 'Checking the return journey');
         state = { ...state, activity: [{ ...activity, turnId: 'synthetic-next-turn', recent }] };
         await render();
-        assert.equal(document.querySelector('.thinking details').open, true);
+        assert.equal(document.querySelector('.thinking details').open, false);
         state = { ...state, activity: [] };
         await render();
         assert.equal(Boolean(document.querySelector('.thinking')), false);
@@ -7131,7 +8020,7 @@ test('analytics follow visible Settings sections, Apps tabs and the Scheduled pa
       const events = event => sent.filter(item => item.event === event);
       const settings = () => events('settings_viewed').map(item => item.properties.tab);
       const tabs = () => events('tab_viewed').map(item => [item.properties.page, item.properties.tab]);
-      const sectionLabels = ['General', 'Notifications', 'Models', 'Voice & audio', 'Memory', 'Privacy & data'];
+      const sectionLabels = ['General', 'Notifications', 'Models', 'Voice & audio', 'Memory', 'Computer use', 'Privacy & data'];
       try {
         await act(async () => root.render(createElement(AccountSettings, {
           account, open: true, initialTab: 'General', openRequest: 0, onOpenChange() {},
@@ -7141,9 +8030,9 @@ test('analytics follow visible Settings sections, Apps tabs and the Scheduled pa
         const navigation = [...document.querySelectorAll('.settings-nav-item')];
         assert.deepEqual(navigation.map(item => item.textContent), sectionLabels);
         for (const item of navigation.slice(1)) await act(async () => item.click());
-        assert.deepEqual(settings(), ['general', 'notifications', 'models', 'voice', 'memory', 'privacy']);
+        assert.deepEqual(settings(), ['general', 'notifications', 'models', 'voice', 'memory', 'computer', 'privacy']);
         await act(async () => navigation.at(-1).click());
-        assert.equal(settings().length, 6);
+        assert.equal(settings().length, 7);
         const scroller = document.querySelector('.settings-scroll');
         Object.defineProperties(scroller, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } });
         document.querySelectorAll('.settings-category > h2').forEach((heading, index) => {
@@ -7161,7 +8050,7 @@ test('analytics follow visible Settings sections, Apps tabs and the Scheduled pa
         consent(true);
         await act(async () => navigation[3].click());
         assert.equal(settings().at(-1), 'voice');
-        for (const path of ['/settings', '/settings/notifications', '/settings/models', '/settings/voice', '/settings/memory', '/settings/privacy']) {
+        for (const path of ['/settings', '/settings/notifications', '/settings/models', '/settings/voice', '/settings/memory', '/settings/computer-use', '/settings/privacy']) {
           window.history.replaceState(null, '', path);
           capturePageview(path);
           assert.equal(events('$pageview').at(-1).properties.route, '/settings');
@@ -7230,7 +8119,7 @@ test('a verified app connection opens chat only on request and keeps private det
       const url = 'https://example.test/sign-in';
       const hash = await setupLinkHash(url);
       const attempt = 'A'.repeat(43);
-      let connected = false, statusReads = 0;
+      let connected = false, statusReads = 0, failure;
       const requests = [], captured = [];
       const app = { slug: 'gmail', name: privateName, status: 'disconnected', triggersEnabled: false, direct: true };
       globalThis.fetch = async (path, options = {}) => {
@@ -7238,7 +8127,7 @@ test('a verified app connection opens chat only on request and keeps private det
         if (path === '/api/apps') return Response.json(connected ? [{ ...app, status: 'connected', connectionId: 'private-connection' }] : []);
         if (path === '/api/apps/catalog') return Response.json([app]);
         if (path === '/api/apps/gmail/connect') return Response.json({ url, attempt });
-        if (path === '/api/apps/setup-status') { statusReads++; return Response.json({ completed: connected ? [hash] : [], apps: [{ hash, slug: 'gmail', name: privateName, available: true }] }); }
+        if (path === '/api/apps/setup-status') { statusReads++; return Response.json({ completed: connected ? [hash] : [], apps: [{ hash, slug: 'gmail', name: privateName, available: !failure, ...(failure ? { error: failure } : {}) }] }); }
         throw new Error('Unexpected fixture request: ' + path);
       };
       setRequestAccount('synthetic-owner');
@@ -7290,6 +8179,26 @@ test('a verified app connection opens chat only on request and keeps private det
         assert.equal(window.location.pathname, '/');
         assert.equal(captured.filter(item => item.event === 'app_connection_chat_requested').length, 1);
         assert.equal(requests.filter(([path]) => path === '/api/messages').length, 0);
+        await act(async () => root.render(null));
+        pageDataCache.clear();
+        connected = false;
+        statusReads = 0;
+        window.history.replaceState(null, '', '/apps');
+        await act(async () => root.render(createElement(Apps, { key: 'failed-sign-in', onAsk() {} })));
+        await settle(() => document.querySelector('[data-connect-service="gmail"]'));
+        await act(async () => document.querySelector('[data-connect-service="gmail"]').click());
+        await settle(() => statusReads > 0);
+        failure = 'Sign-in could not finish: invalid_request: Synthetic refusal';
+        await act(async () => channels.at(-1).onmessage({ data: { service: 'gmail', attempt, connection: 'failed' } }));
+        await settle(() => document.body.textContent.includes(failure));
+        await act(async () => root.render(null));
+        pageDataCache.clear();
+        statusReads = 0;
+        failure = 'Sign-in could not finish: Synthetic polled refusal';
+        await act(async () => root.render(createElement(Apps, { key: 'polled-failure', onAsk() {} })));
+        await settle(() => document.querySelector('[data-connect-service="gmail"]'));
+        await act(async () => document.querySelector('[data-connect-service="gmail"]').click());
+        await settle(() => document.body.textContent.includes(failure));
       } finally { await act(async () => root.unmount()); dom.window.close(); }
     `,
   });

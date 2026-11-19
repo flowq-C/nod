@@ -17,13 +17,13 @@ Nod follows your latest clear message's language, spoken or typed, including que
 
 Type in the message box and press Enter. Press Shift+Enter for a new line.
 
-Pasted text stays literal. Nod uses the clipboard's plain text even when the source also offers formatting. Line breaks, indentation and Markdown-looking characters such as `*priority*`, `# call` and `<u>text</u>` stay as written in the composer, the sent message and Nod's request. An unsent pasted draft keeps them after a reload.
+Pasted text stays literal. Nod uses the clipboard's plain text even when the source also offers formatting. Line breaks, indentation and Markdown-looking characters such as `*priority*`, `# call` and `<u>text</u>` stay as written in the composer, the sent message and Nod's request. The one exception is formatting you add with the toolbar. If plain text in the same paragraph would change it, such as a `!` before a link or a `*` that pairs with italic text, the sent message adds backslashes: before that `!`, or before every `*`, `_`, `~` and backtick in the paragraph's plain text. A web or email address typed directly against formatting is sent as a link, such as `<https://example.com>`. An unsent pasted draft keeps them after a reload.
 
 Messages can contain up to 100,000 characters. Some emoji and symbols count as two characters toward this limit. If your text is longer, the composer keeps your draft and asks you to shorten it or attach the content as a file.
 
 Web and desktop chat limit text message attempts to 120 per minute and audio message attempts to 120 per minute. If you reach either limit, wait and send again.
 
-Use the formatting toolbar when you want formatted text, including underline. Code stays literal, including text that looks like a link or a code fence.
+Use the formatting toolbar when you want formatted text, including underline and links. It also formats pasted text. Code stays literal, including text that looks like a link or a code fence.
 
 - **Attach files.** Select **Attach files**, press Command+U on Mac or Ctrl+U on Windows and Linux while writing a message, paste an image or drop files anywhere in the conversation. Each file stays inside the composer while it uploads. Select it to open the same file viewer used for sent attachments, or retry or remove a failed upload. Each file can be 90 MB or smaller. Nod gets a copy in its [workspace](/use/workspace/). It sees PNG, JPEG and WebP images directly, up to 3.75 MB each and 16 MB per message, unless the model you chose can't read images.
 - **Reply to a message.** Hover over a message and select **Reply**. On touch screens or in a narrow chat, hold or right-click the bubble to open **Reply**, **React** and **Copy**. You can also focus a message and press Shift+F10. Replies show a formatted excerpt in the composer and sent reply. Select it to jump to the original message, then select **Return to where you were** to go back. To see the time inside the bottom-right corner of a bubble, hover over the message, focus one of its controls, or tap its text.
@@ -116,9 +116,9 @@ The message box stays open while Nod works, so you can send another message at a
 
 The line describes the work instead of showing internal tool names. When Nod hasn't named a step, it names the app, website or kind of work that's active, or the model Nod is waiting for. It never counts seconds or guesses when Nod will finish. When Nod answers, the answer takes its place. It clears when Nod asks you something or stops, and hides while the app reconnects. A failed send clears the line and shows an error. Steps come from Nod's own short descriptions, which appear as soon as Nod starts the tool they describe, and, when your model shares a summary of its reasoning, from that summary's heading, such as "Researching Málaga travel ideas".
 
-After an operation finishes, up to four recent operations appear below the line, with the newest first. Select the line to hide or show them. The current activity stays visible. The list covers only the current work and clears when a new request starts. It uses saved activity records and needs no extra model request.
+After an operation finishes, the line keeps up to four recent operations, with the newest first. Their details start closed for each turn. Select the line to show or hide them. The current activity stays visible. The list covers only the current work and clears when a new request starts. It uses saved activity records and needs no extra model request.
 
-![The current activity above four completed operations, beside the Nod mark and above the message box.](../../../assets/screens/chat-recent-activity.png)
+![Expanded recent activity below the current step and above the message box.](../../../assets/screens/chat-recent-activity.png)
 
 The line follows only the work on your messages. A task shows its progress on its own card, and a question from a task or schedule shows it on the small line above that question. While anything works, the message box says **Send another message to Nod…**. While a task works, a small dot pulses just above the top-right corner of the message box. A task that needs your answer shows a slightly larger pink dot with a question mark. Hover over a dot or focus it to see which task it is. Select it to open the task's card with a soft highlight: if the card is already on screen, the chat stays where it is; otherwise the chat scrolls to it.
 
@@ -192,6 +192,14 @@ To answer in your own words, type in **Type your own answer** at the bottom of t
 An action that needs your approval appears as a card with Nod's question and two choices: the action and **Cancel**. An email or message shows the app, the recipients, subject or channel and the text instead, with **Cancel** and the action as buttons below it. Once you answer, the card stays in the conversation, greyed out, with what you chose and what happened. While a sign-in waits for a verification code, a card under Nod's message asks you to send the code by itself in the message box. In Nod web and desktop, a payment that waits for your card's security code shows the same card; the code is the only card detail Nod takes there, and [Approve payment](/trust/payments/) takes it too.
 
 Nod doesn't ask for passwords or card numbers in chat. It uses a saved login or a private form instead. See [Vault](/trust/vault/).
+
+## Start a fresh chat
+
+Send `/clear` as a text message without attachments or a recording to start fresh chat context and a clean view. This command works without a model connection on the web, desktop, Telegram and WhatsApp.
+
+Nod stops work in the main chat. Independent tasks keep running. Files, apps, Vault, memory, schedules and settings stay. Previous messages remain available in chat search. The next message starts with fresh model context; automatic related-chat recall also starts at this point.
+
+Nod has one main chat. `/clear` does not create a second conversation or delete previous messages.
 
 ## Stop Nod
 
