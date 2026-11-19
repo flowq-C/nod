@@ -1,3 +1,20 @@
+# Nod-Stack (Labor-Pilot) - Quelle: github.com/n8n-io/nod, Tag nod-v0.8.0,
+# deployment/self-host/compose.yaml. Chirurgisch geaendert sind NUR die RAM-Limits
+# und das Port-Binding (siehe unten); sonst bytegleich zur Upstream-Datei (Stand nod-v0.8.0).
+#
+# RAM-Rechnung fuer fq-docker-core-01 (gemessen 16.11.2026: 11 GiB RAM verfuegbar
+# lt. Messung 14:24, Nachmessung beim Start 8,7 GiB; 99 G Disk frei):
+#   server 1536m + postgres 512m + browser 2048m + workspace 1280m + runtime 128m
+#   + workspace-network 64m = 5568 MiB (~5,4 GiB) Container-Obergrenze, UNVERAENDERT.
+#   Dazu tmpfs/shm im Nutzungspunkt bis ~1,5 GiB (Upstream-Defaults, unveraendert).
+# Startgroesse-Restriktion: die Nod-Doku nennt 2 CPU / 8 GB RAM / 50 GB Disk als
+# Startgroesse (deploy/self-host.mdx). fq-docker-core-01 traegt 26 Bestandscontainer
+# (pihole = LAN-DNS, caddy = Reverse-Proxy, netbox = Infra-SoT, uptime-kuma = Monitoring),
+# deshalb bleiben diese reduzierten Limits statt der Doku-Werte (2g/3g/2g): den
+# Bestandscontainern bleiben mind. ~5 GiB. Abbruchkriterium (Plan Task 0):
+# OOM oder Neustarts/Lastspruenge bei pihole, caddy, netbox oder uptime-kuma
+# stoppen den Pilot sofort.
+
 name: nod-server
 
 services:
@@ -23,7 +40,12 @@ services:
       WORKSPACE_CONTAINER: nod-workspace-${COMPOSE_PROJECT_NAME:-nod-server}
       BROWSER_CONTAINER: nod-browser-${COMPOSE_PROJECT_NAME:-nod-server}
     ports:
-      - '${NOD_BIND_ADDRESS:-127.0.0.1}:${PORT:-4310}:${PORT:-4310}'
+      # Web-Port 4310 gebunden an die Host-LAN-IP, NIE 0.0.0.0 und nie loopback:
+      # der Interface-Weg laeuft vom Container office-hermes (fq-ops-01) ins LAN zu
+      # fq-docker-core-01:4310 (Plan Task 2 Step 4 / Zielhost-Abschnitt). Loopback
+      # erreicht office-hermes aus dem LAN nicht. Absicherung ueber NOD_AUTH_TOKEN
+      # als Bearer (API und UI).
+      - '172.20.40.18:4310:4310'
     volumes:
       - server-data:/var/lib/nod
       - workspace-data:/var/lib/nod/workspaces
@@ -33,7 +55,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 512
-    mem_limit: ${NOD_SERVER_MEMORY:-2g}
+    mem_limit: ${NOD_SERVER_MEMORY:-1536m}
     networks: [backend, control, outbound]
     depends_on:
       postgres:
@@ -61,6 +83,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks: [backend]
+    mem_limit: ${NOD_POSTGRES_MEMORY:-512m}
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U nod -d nod']
       interval: 5s
@@ -98,7 +121,7 @@ services:
     security_opt: [no-new-privileges:true]
     read_only: true
     pids_limit: 1024
-    mem_limit: ${NOD_BROWSER_MEMORY:-3g}
+    mem_limit: ${NOD_BROWSER_MEMORY:-2048m}
     shm_size: 512m
     volumes:
       - browser-data:/data
@@ -129,7 +152,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 512
-    mem_limit: ${NOD_WORKSPACE_MEMORY:-2g}
+    mem_limit: ${NOD_WORKSPACE_MEMORY:-1280m}
     volumes:
       - workspace-data:/workspace
       - workspace-tools:/home/node
